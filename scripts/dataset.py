@@ -6,6 +6,19 @@ import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+def collate_fn(batch):
+    images, bboxes, attr_labels, index_values, quad_values, ages, sexes = zip(*batch)
+    
+    images = torch.stack(images)
+    bboxes = [b for b in bboxes]
+    attr_labels = torch.stack(attr_labels)
+    index_values = torch.tensor(index_values, dtype=torch.long)
+    quad_values = torch.tensor(quad_values, dtype=torch.long)
+    ages = torch.tensor(ages, dtype=torch.float32)
+    sexes = torch.tensor(sexes, dtype=torch.float32)
+    
+    return images, bboxes, attr_labels, index_values, quad_values, ages, sexes
+
 class ToothDetectionDataset(Dataset):
     def __init__(self, xml_file: str, csv_file: str, images_folder: str, transform=None):
         self.images_folder = images_folder
@@ -42,7 +55,7 @@ class ToothDetectionDataset(Dataset):
                 attr_values = torch.zeros(len(self.attribute_mapping))
                 for attr_name, attr_value in attributes.items():
                     if attr_value.lower() == "true" and attr_name in self.attribute_mapping:
-                        attr_values[self.attribute_mapping[attr_name]] = 1  # One-hot encoding
+                        attr_values[self.attribute_mapping[attr_name]] = 1
 
                 boxes.append({
                     "label": label,

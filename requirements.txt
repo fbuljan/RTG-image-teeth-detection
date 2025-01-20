@@ -13,3 +13,4 @@ torch~=2.5.1
 torchvision~=0.20.1
 typing-extensions~=4.12.2
 tzdata~=2024.2
+ultralytics~=8.3.64
