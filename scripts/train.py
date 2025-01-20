@@ -45,7 +45,7 @@ for epoch in range(num_epochs):
         optimizer.step()
         total_loss += loss.item()
 
-        batch_metrics = calculate_metrics(attributes_pred, attr_labels, index_pred, index_values, quad_pred, quad_values)
+        batch_metrics = calculate_metrics(index_pred, index_values, quad_pred, quad_values)
         for key in train_metrics:
             train_metrics[key] += batch_metrics[key]
 
@@ -78,7 +78,7 @@ for epoch in range(num_epochs):
             )
             val_metrics["loss"] += loss.item()
 
-            batch_metrics = calculate_metrics(attributes_pred, attr_labels, index_pred, index_values, quad_pred, quad_values)
+            batch_metrics = calculate_metrics(index_pred, index_values, quad_pred, quad_values)
             for key in val_metrics:
                 val_metrics[key] += batch_metrics[key]
 
