@@ -4,36 +4,36 @@ import os
 import datetime
 from data_loader import train_loader, val_loader
 from customYOLO import CustomYOLO
-from utils import calculate_metrics, calculate_iou
+from utils import calculate_metrics
 
-# Initialize model and optimizer
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = CustomYOLO().to(device)
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 num_epochs = 50
 
-# Ensure checkpoint directory exists
 os.makedirs("logs/checkpoints", exist_ok=True)
 
-# Training and validation loop
 for epoch in range(num_epochs):
     model.train()
-    total_loss = 0
-    train_metrics = {"loss": 0, "accuracy": 0, "precision": 0, "recall": 0, "iou": 0}
-    num_batches = len(train_loader)
+    total_train_loss = 0.0
+    train_metrics = {"accuracy": 0.0, "precision": 0.0, "recall": 0.0}
+    num_train_batches = len(train_loader)
 
     for images, bboxes, attr_labels, index_values, quad_values, ages, sexes in train_loader:
         images = images.to(device)
-        bboxes = bboxes.to(device)
-        attr_labels = attr_labels.to(device)
-        index_values = index_values.to(device)
-        quad_values = quad_values.to(device)
+        bboxes = [b.to(device) for b in bboxes]
+        attr_labels = [a.to(device) for a in attr_labels]
+        index_values = [i.to(device) for i in index_values]
+        quad_values = [q.to(device) for q in quad_values]
 
         optimizer.zero_grad()
+
+        # raw model output is a tensor (not a list of Results objects)
         yolo_out, attributes_pred, index_pred, quad_pred = model(images)
+        yolo_loss = 0.0  # placeholder if you haven't implemented a detection loss
 
         loss = model.compute_loss(
-            yolo_loss=yolo_out.loss,
+            yolo_loss=yolo_loss,
             attributes_pred=attributes_pred,
             attributes_true=attr_labels,
             index_pred=index_pred,
@@ -41,41 +41,42 @@ for epoch in range(num_epochs):
             quad_pred=quad_pred,
             quad_true=quad_values
         )
-
         loss.backward()
         optimizer.step()
-        total_loss += loss.item()
+        total_train_loss += loss.item()
 
         batch_metrics = calculate_metrics(index_pred, index_values, quad_pred, quad_values)
-        iou_score = calculate_iou(yolo_out.pred_boxes, bboxes)
-        
-        for key in train_metrics:
-            if key == "iou":
-                train_metrics[key] += iou_score
-            else:
-                train_metrics[key] += batch_metrics[key]
+        for k in ["accuracy", "precision", "recall"]:
+            train_metrics[k] += batch_metrics[k]
 
-    for key in train_metrics:
-        train_metrics[key] /= num_batches
+    for k in ["accuracy", "precision", "recall"]:
+        train_metrics[k] /= num_train_batches
 
-    print(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {total_loss:.4f} | Accuracy: {train_metrics['accuracy']:.4f} | Precision: {train_metrics['precision']:.4f} | Recall: {train_metrics['recall']:.4f} | IoU: {train_metrics['iou']:.4f}")
+    avg_train_loss = total_train_loss / num_train_batches
+    print(
+        f"Epoch {epoch+1}/{num_epochs} "
+        f"| Train Loss: {avg_train_loss:.4f} "
+        f"| Acc: {train_metrics['accuracy']:.4f} "
+        f"| Prec: {train_metrics['precision']:.4f} "
+        f"| Recall: {train_metrics['recall']:.4f}"
+    )
 
-    # Validation
     model.eval()
-    val_metrics = {"loss": 0, "accuracy": 0, "precision": 0, "recall": 0, "iou": 0}
-    num_batches = len(val_loader)
+    val_metrics = {"loss": 0.0, "accuracy": 0.0, "precision": 0.0, "recall": 0.0}
+    num_val_batches = len(val_loader)
+
     with torch.no_grad():
         for images, bboxes, attr_labels, index_values, quad_values, ages, sexes in val_loader:
             images = images.to(device)
-            bboxes = bboxes.to(device)
-            attr_labels = attr_labels.to(device)
-            index_values = index_values.to(device)
-            quad_values = quad_values.to(device)
+            bboxes = [b.to(device) for b in bboxes]
+            attr_labels = [a.to(device) for a in attr_labels]
+            index_values = [i.to(device) for i in index_values]
+            quad_values = [q.to(device) for q in quad_values]
 
             yolo_out, attributes_pred, index_pred, quad_pred = model(images)
-
+            yolo_loss = 0.0
             loss = model.compute_loss(
-                yolo_loss=yolo_out.loss,
+                yolo_loss=yolo_loss,
                 attributes_pred=attributes_pred,
                 attributes_true=attr_labels,
                 index_pred=index_pred,
@@ -86,20 +87,21 @@ for epoch in range(num_epochs):
             val_metrics["loss"] += loss.item()
 
             batch_metrics = calculate_metrics(index_pred, index_values, quad_pred, quad_values)
-            iou_score = calculate_iou(yolo_out.pred_boxes, bboxes)
-            
-            for key in val_metrics:
-                if key == "iou":
-                    val_metrics[key] += iou_score
-                else:
-                    val_metrics[key] += batch_metrics[key]
+            val_metrics["accuracy"] += batch_metrics["accuracy"]
+            val_metrics["precision"] += batch_metrics["precision"]
+            val_metrics["recall"] += batch_metrics["recall"]
 
-    for key in val_metrics:
-        val_metrics[key] /= num_batches
+    for k in ["accuracy", "precision", "recall"]:
+        val_metrics[k] /= num_val_batches
+    val_metrics["loss"] /= num_val_batches
 
-    print(f"Validation | Loss: {val_metrics['loss']:.4f} | Accuracy: {val_metrics['accuracy']:.4f} | Precision: {val_metrics['precision']:.4f} | Recall: {val_metrics['recall']:.4f} | IoU: {val_metrics['iou']:.4f}")
+    print(
+        f"Validation | Loss: {val_metrics['loss']:.4f} "
+        f"| Acc: {val_metrics['accuracy']:.4f} "
+        f"| Prec: {val_metrics['precision']:.4f} "
+        f"| Recall: {val_metrics['recall']:.4f}"
+    )
 
-# Save model weights
 end_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 checkpoint_path = f"logs/checkpoints/weights-{end_time}.pth"
 torch.save(model.state_dict(), checkpoint_path)

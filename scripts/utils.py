@@ -1,24 +1,52 @@
 import torch
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 
-def calculate_metrics(index_pred, index_true, quad_pred, quad_true):
-    index_pred_labels = torch.argmax(index_pred, dim=1)
-    quad_pred_labels = torch.argmax(quad_pred, dim=1)
+def calculate_metrics(index_pred, index_true_list, quad_pred, quad_true_list):
+    # index_pred -> [B, 10]
+    # index_true_list -> list of length B, each is a tensor [N_i]
+    # quad_pred -> [B, 10]
+    # quad_true_list -> list of length B, each is a tensor [N_i]
+    B = index_pred.shape[0]
 
-    accuracy = (accuracy_score(index_true.cpu(), index_pred_labels.cpu()) + 
-                accuracy_score(quad_true.cpu(), quad_pred_labels.cpu())) / 2
+    index_pred_labels = torch.argmax(index_pred, dim=1)  # [B]
+    quad_pred_labels = torch.argmax(quad_pred, dim=1)    # [B]
 
-    precision = (precision_score(index_true.cpu(), index_pred_labels.cpu(), average='macro', zero_division=0) + 
-                 precision_score(quad_true.cpu(), quad_pred_labels.cpu(), average='macro', zero_division=0)) / 2
+    # Collect the first ground-truth from each image's list of boxes
+    gt_index = []
+    gt_quad = []
+    for i in range(B):
+        idx_tensor = index_true_list[i]
+        quad_tensor = quad_true_list[i]
+        
+        if idx_tensor.shape[0] > 0:
+            gt_index.append(idx_tensor[0])
+        else:
+            gt_index.append(torch.tensor(0, device=idx_tensor.device))
 
-    recall = (recall_score(index_true.cpu(), index_pred_labels.cpu(), average='macro', zero_division=0) + 
-              recall_score(quad_true.cpu(), quad_pred_labels.cpu(), average='macro', zero_division=0)) / 2
+        if quad_tensor.shape[0] > 0:
+            gt_quad.append(quad_tensor[0])
+        else:
+            gt_quad.append(torch.tensor(0, device=quad_tensor.device))
 
-    return {
-        "accuracy": accuracy,
-        "precision": precision,
-        "recall": recall
-    }
+    gt_index = torch.stack(gt_index, dim=0)  # [B]
+    gt_quad = torch.stack(gt_quad, dim=0)    # [B]
+
+    accuracy = (
+        accuracy_score(gt_index.cpu(), index_pred_labels.cpu())
+        + accuracy_score(gt_quad.cpu(), quad_pred_labels.cpu())
+    ) / 2
+
+    precision = (
+        precision_score(gt_index.cpu(), index_pred_labels.cpu(), average='macro', zero_division=0)
+        + precision_score(gt_quad.cpu(), quad_pred_labels.cpu(), average='macro', zero_division=0)
+    ) / 2
+
+    recall = (
+        recall_score(gt_index.cpu(), index_pred_labels.cpu(), average='macro', zero_division=0)
+        + recall_score(gt_quad.cpu(), quad_pred_labels.cpu(), average='macro', zero_division=0)
+    ) / 2
+
+    return {"accuracy": accuracy, "precision": precision, "recall": recall}
 
 def calculate_iou(pred_boxes, true_boxes):
     pred_x1 = pred_boxes[:, 0] - pred_boxes[:, 2] / 2
