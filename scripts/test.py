@@ -1,78 +1,48 @@
 import torch
 import os
 import glob
+import cv2
+import numpy as np
 from data_loader import test_loader
-from customYOLO import CustomYOLO
-from utils import calculate_metrics, calculate_iou
+from yolo_wrapper import YOLOWrapper
+from ultralytics.utils.plotting import Annotator
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = CustomYOLO().to(device)
+model = YOLOWrapper("yolov8s.pt", num_classes=1).model.to(device)
 model.eval()
 
 checkpoint_dir = "logs/checkpoints"
 checkpoints = sorted(glob.glob(os.path.join(checkpoint_dir, "weights-*.pth")), reverse=True)
+
 if not checkpoints:
     raise FileNotFoundError("No checkpoint files found.")
+
 latest_checkpoint = checkpoints[0]
+weights_name = os.path.basename(latest_checkpoint).replace(".pth", "")
+output_dir = f"logs/{weights_name}"
+os.makedirs(output_dir, exist_ok=True)
+
 print(f"Loading weights from {latest_checkpoint}")
 model.load_state_dict(torch.load(latest_checkpoint, map_location=device))
 
-total_metrics = {"loss": 0.0, "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "iou": 0.0}
-num_batches = len(test_loader)
-
 with torch.no_grad():
-    for images, bboxes, attr_labels, index_values, quad_values, ages, sexes in test_loader:
+    for batch_idx, (images, _, _) in enumerate(test_loader):
         images = images.to(device)
-        bboxes = [b.to(device) for b in bboxes]
-        attr_labels = [a.to(device) for a in attr_labels]
-        index_values = [i.to(device) for i in index_values]
-        quad_values = [q.to(device) for q in quad_values]
+        preds = model(images)
 
-        yolo_out, attributes_pred, index_pred, quad_pred = model(images)
-        yolo_loss = 0.0
-        loss = model.compute_loss(
-            yolo_loss=yolo_loss,
-            attributes_pred=attributes_pred,
-            attributes_true=attr_labels,
-            index_pred=index_pred,
-            index_true=index_values,
-            quad_pred=quad_pred,
-            quad_true=quad_values
-        )
-        total_metrics["loss"] += loss.item()
+        for i, pred in enumerate(preds):
+            img_np = (images[i].cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+            img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
-        batch_metrics = calculate_metrics(index_pred, index_values, quad_pred, quad_values)
-        total_metrics["accuracy"] += batch_metrics["accuracy"]
-        total_metrics["precision"] += batch_metrics["precision"]
-        total_metrics["recall"] += batch_metrics["recall"]
+            annotator = Annotator(img_np)
 
-        pred_boxes_list = [res.boxes.xyxy for res in yolo_out]
-        iou_accum = 0.0
-        pairs_count = 0
-        for i in range(len(pred_boxes_list)):
-            if len(pred_boxes_list[i]) > 0 and len(bboxes[i]) > 0:
-                p_xyxy = pred_boxes_list[i]
-                t_xywh = bboxes[i][:, 1:]
-                p_xywh = torch.zeros_like(p_xyxy)
-                p_xywh[:, 0] = (p_xyxy[:, 0] + p_xyxy[:, 2]) / 2
-                p_xywh[:, 1] = (p_xyxy[:, 1] + p_xyxy[:, 3]) / 2
-                p_xywh[:, 2] = p_xyxy[:, 2] - p_xyxy[:, 0]
-                p_xywh[:, 3] = p_xyxy[:, 3] - p_xyxy[:, 1]
-                m = min(len(t_xywh), len(p_xywh))
-                if m > 0:
-                    iou_accum += calculate_iou(p_xywh[:m], t_xywh[:m])
-                    pairs_count += 1
-        if pairs_count > 0:
-            iou_accum /= pairs_count
-        total_metrics["iou"] += iou_accum
+            for box in pred.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                conf = float(box.conf[0].item())
+                label = f"Tooth {conf:.2f}"
+                annotator.box_label((x1, y1, x2, y2), label, color=(0, 255, 0))
 
-for k in total_metrics:
-    total_metrics[k] /= num_batches
+            output_path = os.path.join(output_dir, f"test_{batch_idx}_{i}.jpg")
+            cv2.imwrite(output_path, img_np)
 
-print(
-    f"Test Results | Loss: {total_metrics['loss']:.4f} "
-    f"| Accuracy: {total_metrics['accuracy']:.4f} "
-    f"| Precision: {total_metrics['precision']:.4f} "
-    f"| Recall: {total_metrics['recall']:.4f} "
-    f"| IoU: {total_metrics['iou']:.4f}"
-)
+print(f"Test images saved in {output_dir}")
