@@ -8,7 +8,7 @@ def main():
     BATCH_SIZE = 4
     IMAGE_SIZE = 640
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    PROJECT_DIR = "runs"
+    PROJECT_DIR = "runs-detection"
 
     model = YOLO(MODEL_NAME)
     model.train(
