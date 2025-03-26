@@ -171,3 +171,4 @@ cython_debug/
 .pypirc
 
 /logs/checkpoints
+/dataset_raw
