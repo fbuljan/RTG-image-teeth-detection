@@ -1,4 +1,4 @@
-model: yolov8s.pt
+model: yolo_models/yolov8s.pt
 data: data.yaml
 epochs: 50
 batch: 4
