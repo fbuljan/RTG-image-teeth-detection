@@ -1,0 +1,6 @@
+model: yolov8m-seg.pt
+data: data.yaml
+epochs: 150
+batch: 4
+imgsz: 640
+project: runs-segmentation
