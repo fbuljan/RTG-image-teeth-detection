@@ -64,6 +64,9 @@ def main():
     num_train = sum(1 for _ in open(os.path.join(SPLIT_DIR, "train.txt")))
     cfg.SOLVER.MAX_ITER     = (num_train // BATCH_SIZE) * EPOCHS
     cfg.SOLVER.STEPS        = []  # no LR decay
+    cfg.SOLVER.LOG_PERIOD        = 20
+    cfg.SOLVER.CHECKPOINT_PERIOD = 1000
+    cfg.TEST.EVAL_PERIOD        = 500
     cfg.OUTPUT_DIR          = OUTPUT_DIR
     cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 128
     cfg.MODEL.ROI_HEADS.NUM_CLASSES         = 1  # just “tooth”
