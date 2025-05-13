@@ -1,0 +1,19 @@
+DATASETS:
+  TRAIN: ["teeth_train"]
+  TEST: ["teeth_val"]
+
+SOLVER:
+  IMS_PER_BATCH: 2
+  BASE_LR: 0.0015
+  MAX_ITER: 20000
+  STEPS: []
+  CHECKPOINT_PERIOD: 1000
+TEST:
+  EVAL_PERIOD: 500
+
+MODEL:
+  ROI_HEADS:
+    BATCH_SIZE_PER_IMAGE: 128
+    NUM_CLASSES: 1
+
+OUTPUT_DIR: "./detectron2_output"
