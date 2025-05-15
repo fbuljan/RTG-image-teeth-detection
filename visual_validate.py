@@ -128,9 +128,7 @@ def main():
         print(f"    OUTPUT keys: {list(outputs.keys())}")
         inst = outputs["instances"].to("cpu")
         print(f"    Instances: {len(inst)}")
-        if len(inst) > 0 and inst.has("scores"):
-            print(f"    Scores    : {inst.scores.tolist()}")
-        elif len(inst) == 0:
+        if len(inst) == 0:
             print("    [WARN] No predictions above threshold.")
 
         v_pred = Visualizer(
