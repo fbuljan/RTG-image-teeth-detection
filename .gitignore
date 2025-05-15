@@ -173,3 +173,4 @@ cython_debug/
 /logs/checkpoints
 /dataset_raw
 /label_previews
+/detectron2_output

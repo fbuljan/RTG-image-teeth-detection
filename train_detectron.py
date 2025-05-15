@@ -11,8 +11,8 @@ import torch
 
 # === Paths that rarely change ===
 COCO_JSON_PATH = "coco_annotations.json"
-SPLIT_DIR      = "splits"
-IMAGE_ROOT     = "dataset_raw"
+SPLIT_DIR = "splits"
+IMAGE_ROOT = "dataset_raw"
 
 def register_split(name, split_txt_path):
     with open(split_txt_path, "r") as f:
@@ -33,41 +33,38 @@ def register_split(name, split_txt_path):
         image_root=IMAGE_ROOT,
     )
 
+# === Subclass DefaultTrainer to define build_evaluator ===
+class TrainerWithEvaluator(DefaultTrainer):
+    @classmethod
+    def build_evaluator(cls, cfg, dataset_name, output_folder=None):
+        if output_folder is None:
+            output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
+        return COCOEvaluator(dataset_name, output_dir=output_folder)
+
 def main():
-    # parse args
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config-file",
-        help="path to config yaml",
-        required=True
-    )
+    parser.add_argument("--config-file", help="path to config yaml", required=True)
     args = parser.parse_args()
 
-    # 1) Register datasets
-    register_split("teeth_train", os.path.join(SPLIT_DIR, "train.txt"))
-    register_split("teeth_val",   os.path.join(SPLIT_DIR, "val.txt"))
+    config_basename = os.path.splitext(os.path.basename(args.config_file))[0]
+    output_dir = os.path.join("detectron2_output", config_basename)
 
-    # 2) Build config from YAML
+    register_split("teeth_train", os.path.join(SPLIT_DIR, "train.txt"))
+    register_split("teeth_val", os.path.join(SPLIT_DIR, "val.txt"))
+
     model_config = "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
     cfg = get_cfg()
-    cfg.merge_from_file(
-        model_zoo.get_config_file(model_config)
-    )
+    cfg.merge_from_file(model_zoo.get_config_file(model_config))
     cfg.merge_from_file(args.config_file)
-
-    # 3) Device override (optional)
     cfg.MODEL.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # 4) Make sure output dir exists
+    cfg.OUTPUT_DIR = output_dir
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
 
-    # 5) Train
-    trainer = DefaultTrainer(cfg)
+    trainer = TrainerWithEvaluator(cfg)
     trainer.resume_or_load(resume=False)
     trainer.train()
 
-    # 6) Final evaluation
-    evaluator  = COCOEvaluator("teeth_val", cfg, False, output_dir=cfg.OUTPUT_DIR)
+    evaluator = COCOEvaluator("teeth_val", output_dir=cfg.OUTPUT_DIR)
     val_loader = build_detection_test_loader(cfg, "teeth_val")
     print("\n🧪 Running validation…")
     results = inference_on_dataset(trainer.model, val_loader, evaluator)
