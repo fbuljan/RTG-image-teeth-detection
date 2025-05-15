@@ -64,11 +64,5 @@ def main():
     trainer.resume_or_load(resume=False)
     trainer.train()
 
-    evaluator = COCOEvaluator("teeth_val", output_dir=cfg.OUTPUT_DIR)
-    val_loader = build_detection_test_loader(cfg, "teeth_val")
-    print("\n🧪 Running validation…")
-    results = inference_on_dataset(trainer.model, val_loader, evaluator)
-    print(results)
-
 if __name__ == "__main__":
     main()
