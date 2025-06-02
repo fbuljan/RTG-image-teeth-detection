@@ -10,6 +10,16 @@ INPUT:
   MIN_SIZE_TRAIN_SAMPLING: "choice"
   MIN_SIZE_TEST: 800
   MAX_SIZE_TEST: 1333
+  AUG:
+    HORIZONTAL_FLIP: false          # Example: true to enable horizontal flip
+    VERTICAL_FLIP: false            # Example: true to enable vertical flip
+    ROTATION_ANGLE: 0               # Example: 10 for [-10, 10] degree random rotation
+    BRIGHTNESS: 0.0                 # Example: 0.2 means ±20% brightness jitter
+    CONTRAST: 0.0                   # Example: 0.2 means ±20% contrast jitter
+    SATURATION: 0.0                 # Example: 0.2 means ±20% saturation jitter
+    CROP:
+      ENABLED: false                # Example: true to enable cropping
+      RANGE: [0.8, 0.8]
 
 SOLVER:
   IMS_PER_BATCH: 2

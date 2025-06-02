@@ -4,8 +4,10 @@ from detectron2.data import DatasetCatalog, MetadataCatalog
 from detectron2.data.datasets import load_coco_json
 from detectron2.engine import DefaultTrainer
 from detectron2.config import get_cfg
-from detectron2.evaluation import COCOEvaluator, inference_on_dataset
-from detectron2.data import build_detection_test_loader
+from detectron2.evaluation import COCOEvaluator
+from detectron2.data import build_detection_train_loader, build_detection_test_loader
+from detectron2.data import DatasetMapper
+from detectron2.data import transforms as T
 from detectron2 import model_zoo
 import torch
 
@@ -33,8 +35,34 @@ def register_split(name, split_txt_path):
         image_root=IMAGE_ROOT,
     )
 
-# === Subclass DefaultTrainer to define build_evaluator ===
-class TrainerWithEvaluator(DefaultTrainer):
+# === Subclass DefaultTrainer to define custom augmentations and evaluator ===
+class TrainerWithCustomAug(DefaultTrainer):
+    @classmethod
+    def build_train_loader(cls, cfg):
+        aug_list = []
+
+        if cfg.INPUT.AUG.HORIZONTAL_FLIP:
+            aug_list.append(T.RandomFlip(horizontal=True, vertical=False))
+        if cfg.INPUT.AUG.VERTICAL_FLIP:
+            aug_list.append(T.RandomFlip(horizontal=False, vertical=True))
+        if cfg.INPUT.AUG.ROTATION_ANGLE > 0:
+            angle = cfg.INPUT.AUG.ROTATION_ANGLE
+            aug_list.append(T.RandomRotation(angle=[-angle, angle]))
+        if cfg.INPUT.AUG.BRIGHTNESS != 0.0:
+            brightness_factor = 1 + cfg.INPUT.AUG.BRIGHTNESS
+            aug_list.append(T.RandomBrightness(1 / brightness_factor, brightness_factor))
+        if cfg.INPUT.AUG.CONTRAST != 0.0:
+            contrast_factor = 1 + cfg.INPUT.AUG.CONTRAST
+            aug_list.append(T.RandomContrast(1 / contrast_factor, contrast_factor))
+        if cfg.INPUT.AUG.SATURATION != 0.0:
+            saturation_factor = 1 + cfg.INPUT.AUG.SATURATION
+            aug_list.append(T.RandomSaturation(1 / saturation_factor, saturation_factor))
+        if cfg.INPUT.AUG.CROP.ENABLED:
+            aug_list.append(T.RandomCrop("relative_range", cfg.INPUT.AUG.CROP.RANGE))
+
+        mapper = DatasetMapper(cfg, is_train=True, augmentations=aug_list)
+        return build_detection_train_loader(cfg, mapper=mapper)
+
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
         if output_folder is None:
@@ -60,7 +88,7 @@ def main():
     cfg.OUTPUT_DIR = output_dir
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
 
-    trainer = TrainerWithEvaluator(cfg)
+    trainer = TrainerWithCustomAug(cfg)
     trainer.resume_or_load(resume=False)
     trainer.train()
 
