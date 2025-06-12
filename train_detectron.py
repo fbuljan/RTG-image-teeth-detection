@@ -11,6 +11,7 @@ from detectron2.data import DatasetMapper
 from detectron2.data import transforms as T
 from detectron2 import model_zoo
 import torch
+import cv2
 
 # === Paths that rarely change ===
 COCO_JSON_PATH = "coco_annotations.json"
