@@ -1,16 +1,6 @@
-filelock~=3.16.1
-fsspec~=2024.12.0
-matplotlib~=3.10.0
-numpy~=2.2.1
-pandas~=2.2.3
-pillow~=11.1.0
-PyYAML~=6.0.2
-scikit-learn~=1.6.1
-scipy~=1.15.1
-setuptools~=75.8.0
-sympy~=1.13.1
-torch~=2.5.1
-torchvision~=0.20.1
-typing-extensions~=4.12.2
-tzdata~=2024.2
-ultralytics~=8.3.64
+torch>=2.0
+torchvision
+opencv-python-headless
+pycocotools
+shapely
+detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cu118/torch2.0/index.html
