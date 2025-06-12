@@ -4,6 +4,7 @@ from detectron2.data import DatasetCatalog, MetadataCatalog
 from detectron2.data.datasets import load_coco_json
 from detectron2.engine import DefaultTrainer
 from detectron2.config import get_cfg
+from detectron2.config import CfgNode as CN
 from detectron2.evaluation import COCOEvaluator
 from detectron2.data import build_detection_train_loader, build_detection_test_loader
 from detectron2.data import DatasetMapper
@@ -83,6 +84,17 @@ def main():
     model_config = "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
     cfg = get_cfg()
     cfg.merge_from_file(model_zoo.get_config_file(model_config))
+    # add custom keys
+    cfg.INPUT.AUG = CN()
+    cfg.INPUT.AUG.HORIZONTAL_FLIP = False
+    cfg.INPUT.AUG.VERTICAL_FLIP = False
+    cfg.INPUT.AUG.ROTATION_ANGLE = 0
+    cfg.INPUT.AUG.BRIGHTNESS = 0.0
+    cfg.INPUT.AUG.CONTRAST = 0.0
+    cfg.INPUT.AUG.SATURATION = 0.0
+    cfg.INPUT.AUG.CROP = CN()
+    cfg.INPUT.AUG.CROP.ENABLED = False
+    cfg.INPUT.AUG.CROP.RANGE = [1.0, 1.0]
     cfg.merge_from_file(args.config_file)
     cfg.MODEL.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     cfg.OUTPUT_DIR = output_dir
