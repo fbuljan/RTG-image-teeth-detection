@@ -19,7 +19,7 @@ IMAGE_ROOT = "dataset_raw"
 
 def register_split(name, split_txt_path):
     with open(split_txt_path, "r") as f:
-        wanted = {os.path.basename(l.strip()) for l in f if l.strip()}
+        wanted = {os.path.basename(l.strip().replace("\\", "/")) for l in f if l.strip()}
 
     def loader():
         dicts = load_coco_json(
