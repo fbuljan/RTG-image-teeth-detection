@@ -174,3 +174,7 @@ cython_debug/
 /dataset_raw
 /label_previews
 /detectron2_output
+
+.DS_STORE
+/visualizations
+/runs-segmentation

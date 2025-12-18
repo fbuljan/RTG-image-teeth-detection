@@ -1,6 +1,6 @@
-train: images/train
-val: images/val
-test: images/test
+train: datasets/images/train
+val: datasets/images/val
+test: datasets/images/test
 
 names:
   0: tooth
