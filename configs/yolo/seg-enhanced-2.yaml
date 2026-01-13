@@ -4,7 +4,7 @@ epochs: 25
 batch: 4
 imgsz: 640
 project: runs-segmentation
-name: experiment_optimized
+name: seg-enhanced-2
 
 train_args:
   val: false
