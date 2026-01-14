@@ -114,17 +114,21 @@ def main():
     train_args = config.get("train_args", {}).copy()
 
     if resume_training:
-        # TRUE RESUME MODE: Use Ultralytics resume parameter
-        # This restores: optimizer state, LR scheduler, epoch counter
-        # CRITICAL: Set warmup_epochs=0 to prevent restart
+        # SIMPLIFIED APPROACH: Use warm start (weights only, no optimizer state)
+        # Ultralytics' resume feature is too complex for batch training
+        # Trade-off: We lose optimizer momentum between segments, but training still works
+        print(f"\nResume mode (warm start): Loading weights from {model_path}")
+        print("  Note: Optimizer state will be reset (warm start, not true resume)")
+        print("  Disabling warmup for continued training")
+
+        # Disable warmup for continued training
         train_args["warmup_epochs"] = 0
         train_args["warmup_momentum"] = train_args.get("momentum", 0.937)
         train_args["warmup_bias_lr"] = train_args.get("lr0", 0.01)
-        print("\nResume mode: Disabled warmup (already completed in first segment)")
-        print(f"  warmup_epochs: 0 (was {config.get('train_args', {}).get('warmup_epochs', 'N/A')})")
 
+        # Simple warm start: load model weights and train for more epochs
         results = model.train(
-            resume=True,  # KEY: Restore optimizer state
+            epochs=config["epochs"],
             **train_config,
             **train_args
         )
