@@ -33,59 +33,49 @@ for img_path in image_paths:
     with open(label_path, "r") as f:
         for li, line in enumerate(f, start=1):
             parts = line.strip().split()
-            if len(parts) < 5:
-                warn(f"{stem}.txt line {li}: too few values")
+            # YOLO segmentation format: class_id x1 y1 x2 y2 ... xn yn
+            # Minimum: class_id + 3 points (6 coords) = 7 values
+            if len(parts) < 7:
+                warn(f"{stem}.txt line {li}: too few values (need class + min 3 points)")
                 continue
 
             try:
                 class_id = int(parts[0])
-                xc, yc, bw, bh = map(float, parts[1:5])
             except Exception:
-                warn(f"{stem}.txt line {li}: parse error for bbox")
+                warn(f"{stem}.txt line {li}: parse error for class_id")
                 continue
 
-            # bbox range check (0..1)
-            if not (0 <= xc <= 1 and 0 <= yc <= 1 and 0 < bw <= 1 and 0 < bh <= 1):
-                warn(f"{stem}.txt line {li}: bbox out of [0,1] range")
+            # Parse polygon coordinates (all values after class_id)
+            coords = parts[1:]
+            if len(coords) % 2 != 0:
+                warn(f"{stem}.txt line {li}: odd number of coordinates")
+                continue
 
-            # denorm bbox
-            x1 = int((xc - bw / 2) * w)
-            y1 = int((yc - bh / 2) * h)
-            x2 = int((xc + bw / 2) * w)
-            y2 = int((yc + bh / 2) * h)
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0,255,0), 2)
-            cv2.putText(img, str(class_id), (x1, max(0, y1-5)),
+            try:
+                pts = np.array(list(map(float, coords)), dtype=np.float32).reshape(-1, 2)
+            except Exception:
+                warn(f"{stem}.txt line {li}: parse error for polygon")
+                continue
+
+            # range check before denorm
+            if (pts < 0).any() or (pts > 1).any():
+                warn(f"{stem}.txt line {li}: poly coords outside [0,1]")
+
+            # denorm + clip
+            pts[:, 0] = np.clip(pts[:, 0] * w, 0, w-1)
+            pts[:, 1] = np.clip(pts[:, 1] * h, 0, h-1)
+            pts = pts.astype(np.int32)
+
+            # Calculate bounding box from polygon for visualization
+            x_min, y_min = pts.min(axis=0)
+            x_max, y_max = pts.max(axis=0)
+            cv2.rectangle(img, (x_min, y_min), (x_max, y_max), (0,255,0), 2)
+            cv2.putText(img, str(class_id), (x_min, max(0, y_min-5)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
 
-            # segments: allow multiple polygons separated by '|'
-            seg_raw = " ".join(parts[5:])
-            if not seg_raw:
-                continue
-
-            segments = [seg.strip() for seg in seg_raw.split("|") if seg.strip()]
-            for si, seg in enumerate(segments, start=1):
-                coords = seg.split()
-                if len(coords) % 2 != 0 or len(coords) < 6:
-                    warn(f"{stem}.txt line {li} seg {si}: invalid poly (need >=3 points)")
-                    continue
-                try:
-                    pts = np.array(list(map(float, coords)), dtype=np.float32).reshape(-1, 2)
-                except Exception:
-                    warn(f"{stem}.txt line {li} seg {si}: parse error")
-                    continue
-
-                # range check before denorm
-                if (pts < 0).any() or (pts > 1).any():
-                    warn(f"{stem}.txt line {li} seg {si}: poly coords outside [0,1]")
-
-                # denorm + clip
-                pts[:, 0] = np.clip(pts[:, 0] * w, 0, w-1)
-                pts[:, 1] = np.clip(pts[:, 1] * h, 0, h-1)
-                pts = pts.astype(np.int32)
-
-                # draw outline + filled (alpha)
-                cv2.polylines(img, [pts], isClosed=True, color=(0,0,255), thickness=2)
-                cv2.fillPoly(overlay, [pts], color=(0,0,255))
+            # draw outline + filled (alpha)
+            cv2.polylines(img, [pts], isClosed=True, color=(0,0,255), thickness=2)
+            cv2.fillPoly(overlay, [pts], color=(0,0,255))
     
     # alpha blend for masks
     out = cv2.addWeighted(overlay, 0.25, img, 0.75, 0)

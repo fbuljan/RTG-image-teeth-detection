@@ -9,8 +9,19 @@ IMAGES_DIR = "datasets/images/train"
 OUTPUT_CSV = "label_validation_report.csv"
 MAX_FILES = 100
 
+def bbox_from_polygon(coords):
+    """Izračunaj bounding box iz polygon koordinata (normalizirane)"""
+    pts = np.array(coords).reshape(-1, 2)
+    x_min, y_min = pts.min(axis=0)
+    x_max, y_max = pts.max(axis=0)
+    x_center = (x_min + x_max) / 2
+    y_center = (y_min + y_max) / 2
+    width = x_max - x_min
+    height = y_max - y_min
+    return (x_center, y_center, width, height)
+
 def iou(box1, box2):
-    """Izračun Intersection-over-Union između dva bounding boxa"""
+    """Izračun Intersection-over-Union između dva bounding boxa (center format)"""
     x1_min = box1[0] - box1[2] / 2
     y1_min = box1[1] - box1[3] / 2
     x1_max = box1[0] + box1[2] / 2
@@ -55,17 +66,21 @@ def validate_label(label_path, img_path):
     boxes = []
     for line in lines:
         parts = line.strip().split()
-        if len(parts) < 10 or (len(parts) - 5) % 2 != 0:
+        # YOLO segmentation format: class_id x1 y1 x2 y2 ... xn yn
+        # Minimum: class_id + 3 points (6 coords) = 7 values
+        if len(parts) < 7 or (len(parts) - 1) % 2 != 0:
             results["invalid_lines"] += 1
             continue
 
         try:
-            x_center, y_center, w, h = map(float, parts[1:5])
-            poly_coords = list(map(float, parts[5:]))
+            class_id = int(parts[0])
+            poly_coords = list(map(float, parts[1:]))
             if not all(0 <= c <= 1 for c in poly_coords):
                 results["invalid_lines"] += 1
                 continue
-            boxes.append((x_center, y_center, w, h))
+            # Calculate bbox from polygon for duplicate detection
+            bbox = bbox_from_polygon(poly_coords)
+            boxes.append(bbox)
         except:
             results["invalid_lines"] += 1
             continue

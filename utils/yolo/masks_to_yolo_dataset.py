@@ -82,12 +82,14 @@ for folder_name in os.listdir(input_root):
                     idx = np.linspace(0, len(cnt)-1, 100, dtype=np.int32)
                     cnt = cnt[idx]
 
+                # YOLO segmentation format: class_id x1 y1 x2 y2 ... xn yn
+                # NO bounding box - just polygon coordinates
                 segmentation = []
                 for px, py in cnt:
                     segmentation.append(f"{px/w:.6f} {py/h:.6f}")
 
                 seg_str = " ".join(segmentation)
-                line = f"0 {x_center:.6f} {y_center:.6f} {norm_bw:.6f} {norm_bh:.6f} {seg_str}"
+                line = f"0 {seg_str}"
                 yolo_lines.append(line)
 
     # 3. Spremi anotaciju ako ne postoji ili je prazna
