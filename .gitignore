@@ -181,3 +181,4 @@ cython_debug/
 
 # Claude Code
 CLAUDE.md
+tasks.md

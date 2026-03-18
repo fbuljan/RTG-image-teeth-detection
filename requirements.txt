@@ -4,3 +4,14 @@ opencv-python-headless
 pycocotools
 shapely
 detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cu118/torch2.0/index.html
+
+# Identification pipeline
+pandas
+scikit-learn
+pytorch-metric-learning
+faiss-cpu
+umap-learn
+matplotlib
+tqdm
+Pillow
+pyyaml
