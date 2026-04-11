@@ -1,0 +1,44 @@
+experiment_name: tooth_fdi_classifier_masked
+
+data:
+  manifest: identification/data/manifest_clean.csv
+  crop_mode: masked
+  target_col: tooth_fdi
+  filter_nonempty: false
+  num_workers: 0
+  pin_memory: false
+
+model:
+  backbone: resnet18
+  pretrained: true
+  dropout: 0.2
+
+train:
+  batch_size: 64
+  epochs: 15
+  optimizer: AdamW
+  lr: 0.001
+  weight_decay: 0.01
+  scheduler: cosine
+  warmup_epochs: 2
+  label_smoothing: 0.1
+  class_weight_strategy: none
+
+augmentation:
+  rotation_degrees: 10
+  translate: 0.05
+  brightness: 0.1
+  contrast: 0.1
+  blur_kernel: 3
+  blur_sigma_max: 0.5
+  noise_sigma: 0.01
+
+eval:
+  val_every_n_epochs: 1
+  patience: 5
+  save_best_metric: val_accuracy
+
+output:
+  dir: identification/runs/tooth_fdi_masked
+  save_last: true
+  save_best: true
