@@ -1,0 +1,45 @@
+"""
+Tooth embedding model for metric learning.
+
+ResNet-18 backbone with projection head producing L2-normalized embeddings.
+Reuses backbone pattern from classifier.py. Backbone/head separation
+enables Phase 4 metadata fusion.
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.models as models
+
+
+class ToothEmbeddingModel(nn.Module):
+    """
+    ResNet-18 based embedding model for tooth crops.
+
+    Args:
+        embedding_dim: Output embedding dimension.
+        pretrained: Use ImageNet pretrained weights.
+        dropout: Dropout rate before projection head.
+    """
+
+    def __init__(self, embedding_dim: int = 128, pretrained: bool = True, dropout: float = 0.2):
+        super().__init__()
+        weights = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
+        self.backbone = models.resnet18(weights=weights)
+        self.feature_dim = self.backbone.fc.in_features  # 512
+        self.backbone.fc = nn.Identity()
+
+        self.dropout = nn.Dropout(dropout)
+        self.projection_head = nn.Linear(self.feature_dim, embedding_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Returns L2-normalized embeddings of shape (B, embedding_dim)."""
+        features = self.backbone(x)
+        features = self.dropout(features)
+        embeddings = self.projection_head(features)
+        embeddings = F.normalize(embeddings, p=2, dim=1)
+        return embeddings
+
+    def get_backbone_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract raw backbone features (512-dim) without projection."""
+        return self.backbone(x)

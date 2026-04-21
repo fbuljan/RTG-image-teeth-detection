@@ -163,6 +163,10 @@ class ToothDataset(Dataset):
     def num_classes(self) -> int:
         return len(self.label_map)
 
+    def get_labels(self) -> list:
+        """Return integer labels for all samples (used by PK sampler)."""
+        return [self.label_map[row[self.target_col]] for _, row in self.df.iterrows()]
+
     def get_class_counts(self) -> Dict[str, int]:
         """Return per-class sample counts for this split."""
         counts = self.df[self.target_col].value_counts().to_dict()
