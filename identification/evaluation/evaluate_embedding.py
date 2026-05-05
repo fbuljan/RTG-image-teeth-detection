@@ -22,20 +22,34 @@ from sklearn.metrics import roc_auc_score, roc_curve
 from torch.utils.data import DataLoader
 
 from identification.data.tooth_dataset import ToothDataset, get_val_transforms
-from identification.models.embedding_model import ToothEmbeddingModel
+from identification.models.embedding_model import ToothEmbeddingModel, ToothEmbeddingModelWithMetadata
 
 
 def load_checkpoint(checkpoint_path: str, device: str):
-    """Load embedding model from checkpoint."""
+    """Load embedding model from checkpoint (supports both plain and metadata variants)."""
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg = ckpt["config"]
     label_map = ckpt["label_map"]
 
-    model = ToothEmbeddingModel(
-        embedding_dim=cfg["model"].get("embedding_dim", 128),
-        pretrained=False,
-        dropout=cfg["model"].get("dropout", 0.2),
-    )
+    # Detect metadata variant by config key or presence of fdi_label_map
+    uses_metadata = "fdi_embedding_dim" in cfg.get("model", {}) or "fdi_label_map" in ckpt
+
+    if uses_metadata:
+        fdi_label_map = ckpt["fdi_label_map"]
+        model = ToothEmbeddingModelWithMetadata(
+            num_fdi=len(fdi_label_map),
+            fdi_embedding_dim=cfg["model"].get("fdi_embedding_dim", 16),
+            embedding_dim=cfg["model"].get("embedding_dim", 128),
+            pretrained=False,
+            dropout=cfg["model"].get("dropout", 0.2),
+        )
+    else:
+        model = ToothEmbeddingModel(
+            embedding_dim=cfg["model"].get("embedding_dim", 128),
+            pretrained=False,
+            dropout=cfg["model"].get("dropout", 0.2),
+        )
+
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device)
     model.eval()
@@ -43,22 +57,59 @@ def load_checkpoint(checkpoint_path: str, device: str):
     return model, cfg, label_map, ckpt
 
 
+def build_eval_dataset(cfg, split, label_map, ckpt=None, uses_metadata=False, filter_fn=None):
+    """Build a ToothDataset for evaluation, handling metadata variant."""
+    return ToothDataset(
+        manifest_path=cfg["data"]["manifest"],
+        split=split,
+        crop_mode=cfg["data"]["crop_mode"],
+        target_col=cfg["data"]["target_col"],
+        filter_fn=filter_fn,
+        transform=get_val_transforms(),
+        label_map=label_map,
+        return_metadata=uses_metadata,
+        fdi_label_map=(ckpt or {}).get("fdi_label_map") if uses_metadata else None,
+    )
+
+
 @torch.no_grad()
 def extract_embeddings(model, loader, device):
-    """Extract embeddings and labels for all samples."""
+    """Extract embeddings and labels for all samples.
+
+    Handles both plain (image, label) and metadata (image, label, fdi_idx) datasets.
+    """
     all_embeddings = []
     all_labels = []
+    uses_metadata = isinstance(model, ToothEmbeddingModelWithMetadata)
 
-    for images, labels in loader:
-        images = images.to(device)
-        emb = model(images)
+    for batch in loader:
+        if uses_metadata:
+            images, labels, fdi_idx = batch
+            images = images.to(device)
+            fdi_idx = fdi_idx.to(device)
+            emb = model(images, fdi_idx)
+        else:
+            images, labels = batch
+            images = images.to(device)
+            emb = model(images)
         all_embeddings.append(emb.cpu())
         all_labels.append(labels)
 
     if device == "mps":
         torch.mps.empty_cache()
 
-    return torch.cat(all_embeddings, dim=0).numpy(), torch.cat(all_labels, dim=0).numpy()
+    embeddings = torch.cat(all_embeddings, dim=0).numpy()
+    labels = torch.cat(all_labels, dim=0).numpy()
+
+    # Filter out any embeddings containing NaN/Inf (rare MPS edge cases)
+    finite_mask = np.all(np.isfinite(embeddings), axis=1)
+    if not finite_mask.all():
+        n_bad = (~finite_mask).sum()
+        print(f"Warning: dropping {n_bad} embeddings with NaN/Inf values")
+        embeddings = embeddings[finite_mask]
+        labels = labels[finite_mask]
+
+    return embeddings, labels
 
 
 def evaluate_verification(embeddings: np.ndarray, labels: np.ndarray):
@@ -77,15 +128,34 @@ def evaluate_verification(embeddings: np.ndarray, labels: np.ndarray):
     pair_scores = sim_matrix[triu_idx]
     pair_labels = (labels[triu_idx[0]] == labels[triu_idx[1]]).astype(int)
 
+    # Guard: need both positive and negative pairs for ROC
+    if pair_labels.sum() == 0 or pair_labels.sum() == len(pair_labels):
+        return {
+            "auc": float("nan"),
+            "eer": float("nan"),
+            "eer_threshold": float("nan"),
+            "num_pairs": int(len(pair_labels)),
+            "num_positive_pairs": int(pair_labels.sum()),
+            "num_negative_pairs": int(len(pair_labels) - pair_labels.sum()),
+            "_roc_fpr": np.array([0.0, 1.0]),
+            "_roc_tpr": np.array([0.0, 1.0]),
+        }
+
     # ROC curve
     fpr, tpr, thresholds = roc_curve(pair_labels, pair_scores)
     auc = roc_auc_score(pair_labels, pair_scores)
 
     # EER: where FPR == 1 - TPR (FAR == FRR)
     fnr = 1 - tpr
-    eer_idx = np.nanargmin(np.abs(fpr - fnr))
-    eer = float((fpr[eer_idx] + fnr[eer_idx]) / 2)
-    eer_threshold = float(thresholds[eer_idx])
+    diffs = np.abs(fpr - fnr)
+    valid = ~np.isnan(diffs)
+    if not valid.any():
+        eer = float("nan")
+        eer_threshold = float("nan")
+    else:
+        eer_idx = np.argmin(np.where(valid, diffs, np.inf))
+        eer = float((fpr[eer_idx] + fnr[eer_idx]) / 2)
+        eer_threshold = float(thresholds[eer_idx])
 
     # Stats
     num_positive = int(pair_labels.sum())
@@ -109,9 +179,23 @@ def evaluate_retrieval(embeddings: np.ndarray, labels: np.ndarray):
 
     For each sample, find nearest neighbors and check if they share the same person.
     Returns Rank-1, Rank-5, Rank-10, mAP, and CMC curve.
+
+    If no person has more than 1 sample, retrieval is not well-defined — returns NaN.
     """
     sim_matrix = embeddings @ embeddings.T
     n = len(labels)
+
+    # Check if retrieval is possible: need at least one person with >1 sample
+    unique, counts = np.unique(labels, return_counts=True)
+    if counts.max() < 2:
+        return {
+            "rank1_micro": float("nan"),
+            "rank1_macro": float("nan"),
+            "rank5": float("nan"),
+            "rank10": float("nan"),
+            "mAP": float("nan"),
+            "_cmc": np.full(min(50, n - 1), np.nan),
+        }
 
     # Exclude self-matches
     np.fill_diagonal(sim_matrix, -float("inf"))
@@ -225,6 +309,7 @@ def main():
     manifest_path = cfg["data"]["manifest"]
     target_col = cfg["data"]["target_col"]
 
+    uses_metadata = isinstance(model, ToothEmbeddingModelWithMetadata)
     dataset = ToothDataset(
         manifest_path=manifest_path,
         split=args.split,
@@ -232,6 +317,8 @@ def main():
         target_col=target_col,
         transform=get_val_transforms(),
         label_map=label_map,
+        return_metadata=uses_metadata,
+        fdi_label_map=ckpt.get("fdi_label_map") if uses_metadata else None,
     )
     loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=0)
     print(f"Evaluating on {args.split}: {len(dataset)} samples, {len(label_map)} persons")
