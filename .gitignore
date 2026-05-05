@@ -189,3 +189,6 @@ identification/data/review_grid.png
 identification/data/plots/
 identification/runs/
 identification/docs/
+
+# Claude local state
+.claude/
