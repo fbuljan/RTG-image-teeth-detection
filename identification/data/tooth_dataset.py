@@ -93,11 +93,15 @@ class ToothDataset(Dataset):
         filter_fn: Optional[Callable] = None,
         transform: Optional[Callable] = None,
         label_map: Optional[Dict[str, int]] = None,
+        return_metadata: bool = False,
+        fdi_label_map: Optional[Dict[str, int]] = None,
     ):
         self.root_dir = Path(root_dir) if root_dir else PROJECT_ROOT
         self.crop_mode = crop_mode
         self.target_col = target_col
         self.transform = transform
+        self.return_metadata = return_metadata
+        self.fdi_label_map = fdi_label_map
 
         # Load and filter manifest
         df = pd.read_csv(manifest_path, dtype=str)
@@ -114,10 +118,13 @@ class ToothDataset(Dataset):
         self.label_map = label_map
         self.label_to_name = {v: k for k, v in label_map.items()}
 
+        if return_metadata and fdi_label_map is None:
+            raise ValueError("fdi_label_map is required when return_metadata=True.")
+
     def __len__(self) -> int:
         return len(self.df)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
+    def __getitem__(self, idx: int):
         row = self.df.iloc[idx]
         img_path = self.root_dir / row[self.path_col]
 
@@ -131,6 +138,11 @@ class ToothDataset(Dataset):
             img = self.transform(img)
 
         label = self.label_map[row[self.target_col]]
+
+        if self.return_metadata:
+            fdi_idx = self.fdi_label_map[row["tooth_fdi"]]
+            return img, label, fdi_idx
+
         return img, label
 
     @staticmethod

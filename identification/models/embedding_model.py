@@ -43,3 +43,40 @@ class ToothEmbeddingModel(nn.Module):
     def get_backbone_features(self, x: torch.Tensor) -> torch.Tensor:
         """Extract raw backbone features (512-dim) without projection."""
         return self.backbone(x)
+
+
+class ToothEmbeddingModelWithMetadata(nn.Module):
+    """
+    ResNet-18 backbone + FDI metadata embedding, fused at feature level.
+
+    Architecture:
+        image -> ResNet-18 -> 512-dim features
+        fdi_idx -> Embedding(num_fdi, fdi_embedding_dim) -> 16-dim
+        concat -> Dropout -> Linear(512+16, embedding_dim) -> L2 normalize
+    """
+
+    def __init__(
+        self,
+        num_fdi: int,
+        fdi_embedding_dim: int = 16,
+        embedding_dim: int = 128,
+        pretrained: bool = True,
+        dropout: float = 0.2,
+    ):
+        super().__init__()
+        weights = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
+        self.backbone = models.resnet18(weights=weights)
+        self.feature_dim = self.backbone.fc.in_features  # 512
+        self.backbone.fc = nn.Identity()
+
+        self.fdi_embedding = nn.Embedding(num_fdi, fdi_embedding_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.projection_head = nn.Linear(self.feature_dim + fdi_embedding_dim, embedding_dim)
+
+    def forward(self, image: torch.Tensor, fdi_idx: torch.Tensor) -> torch.Tensor:
+        visual = self.backbone(image)          # (B, 512)
+        meta = self.fdi_embedding(fdi_idx)     # (B, fdi_dim)
+        fused = torch.cat([visual, meta], dim=1)
+        fused = self.dropout(fused)
+        embeddings = self.projection_head(fused)
+        return F.normalize(embeddings, p=2, dim=1)
