@@ -86,11 +86,17 @@ def fig_model_comparison():
 
 
 def fig_multi_tooth_curve():
-    """Multi-tooth aggregation: Rank-1 vs n_query for baseline + FDI-init."""
-    fig, ax = plt.subplots(figsize=(10, 6))
+    """Multi-tooth aggregation: Rank-1 vs n_query for all 4 models + classification baseline."""
+    fig, ax = plt.subplots(figsize=(11, 6))
 
-    for label, run_dir, color in [("Baseline (raw)", "embedding_triplet_v1", "tab:blue"),
-                                    ("FDI-init", "embedding_fdi_init_v1", "tab:red")]:
+    model_styles = [
+        ("Baseline (raw)", "embedding_triplet_v1", "tab:blue", "o"),
+        ("Masked", "embedding_triplet_masked_v1", "tab:green", "^"),
+        ("Metadata", "embedding_metadata_v1", "tab:orange", "v"),
+        ("FDI-init", "embedding_fdi_init_v1", "tab:red", "D"),
+    ]
+
+    for label, run_dir, color, marker in model_styles:
         metrics = load_json(REPO_ROOT / "identification" / "runs" / run_dir / "analysis" / "person_retrieval" / "metrics.json")
         if metrics is None:
             continue
@@ -99,8 +105,8 @@ def fig_multi_tooth_curve():
         if len(mean_sub) == 0:
             continue
         ax.errorbar(mean_sub["n_query"], mean_sub["rank1_mean"],
-                    yerr=mean_sub["rank1_std"], marker="o", capsize=4,
-                    label=f"{label} — mean", color=color, linewidth=2)
+                    yerr=mean_sub["rank1_std"], marker=marker, capsize=4,
+                    label=label, color=color, linewidth=2, markersize=7)
 
     # Reference: classification baseline (FDI features)
     fdi_classifier = load_json(REPO_ROOT / "identification" / "runs" / "tooth_fdi_raw" / "analysis" / "as_embedding" / "metrics.json")
@@ -109,18 +115,20 @@ def fig_multi_tooth_curve():
         sweep_sorted = sweep.sort_values("n_query")
         ax.errorbar(sweep_sorted["n_query"], sweep_sorted["rank1_mean"],
                     yerr=sweep_sorted["rank1_std"], marker="s", capsize=4,
-                    label="Classification baseline (FDI features)",
-                    color="tab:gray", linestyle="--")
+                    label="Classification baseline\n(FDI classifier features)",
+                    color="tab:gray", linestyle="--", markersize=7)
 
-    ax.set_xlabel("Number of teeth per person (in both query and gallery)")
+    ax.set_xlabel("Number of teeth held out as query (gallery has the rest)")
     ax.set_ylabel("Rank-1 accuracy")
-    ax.set_title("Multi-tooth aggregation: Rank-1 vs query size")
-    ax.set_xscale("log", base=2)
-    ax.set_xticks([1, 2, 4, 8, 16])
-    ax.set_xticklabels(["1", "2", "4", "8", "16"])
+    ax.set_title("Multi-tooth aggregation: Rank-1 vs query size (mean pooling)")
+    ax.set_xticks([1, 2, 4, 8, 16, 24, 32])
     ax.set_ylim(0, 1.0)
     ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper left")
+    ax.legend(loc="upper left", fontsize=9)
+
+    # Annotate peak
+    ax.axvline(x=16, color="black", linestyle=":", alpha=0.3)
+    ax.text(16.3, 0.05, "peak at\nn_query=16", fontsize=8, color="black", alpha=0.7)
     fig.tight_layout()
     fig.savefig(DOCS_DIR / "02_multi_tooth_aggregation.png", dpi=150)
     plt.close(fig)
