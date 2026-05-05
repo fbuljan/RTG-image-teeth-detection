@@ -1,0 +1,57 @@
+# Phase 4.6: Embedding with FDI-classifier-pretrained backbone
+experiment_name: embedding_fdi_init_v1
+
+data:
+  manifest: identification/data/manifest_clean.csv
+  crop_mode: raw
+  target_col: person_id
+  num_workers: 0
+  pin_memory: false
+
+model:
+  backbone: resnet18
+  pretrained: true  # start from ImageNet, then override with classifier weights
+  embedding_dim: 128
+  dropout: 0.2
+
+# Auto-load backbone weights from Phase 2 classifier
+init_from_classifier: identification/runs/tooth_fdi_raw/best.pt
+
+train:
+  epochs: 60
+  optimizer: AdamW
+  lr: 0.0001
+  weight_decay: 0.01
+  scheduler: cosine
+  warmup_epochs: 2
+
+sampler:
+  p: 16
+  k: 4
+
+loss:
+  type: triplet_margin
+  margin: 0.2
+
+miner:
+  type: multi_similarity
+  epsilon: 0.1
+
+augmentation:
+  rotation_degrees: 10
+  translate: 0.05
+  brightness: 0.1
+  contrast: 0.1
+  blur_kernel: 3
+  blur_sigma_max: 0.5
+  noise_sigma: 0.01
+
+eval:
+  val_every_n_epochs: 3
+  patience: 10
+  save_best_metric: rank1
+
+output:
+  dir: identification/runs/embedding_fdi_init_v1
+  save_last: true
+  save_best: true
