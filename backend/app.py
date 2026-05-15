@@ -13,11 +13,13 @@ Run locally:
 
 from __future__ import annotations
 
+import csv
 import json
 import shutil
 import uuid
 from pathlib import Path
 
+import yaml
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -111,6 +113,99 @@ def download_panoramic(person_id: str):
         media_type="image/png",
         filename="xray.png",
     )
+
+
+def _load_csv(path: Path) -> list[dict]:
+    """Load a CSV into a list of dicts, casting numeric fields to floats."""
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    with open(path) as f:
+        for row in csv.DictReader(f):
+            casted: dict = {}
+            for k, v in row.items():
+                if v is None:
+                    casted[k] = None
+                    continue
+                try:
+                    casted[k] = float(v)
+                except (TypeError, ValueError):
+                    casted[k] = v
+            rows.append(casted)
+    return rows
+
+
+def _build_model_card() -> dict:
+    """Assemble static facts about the deployed embedder for the UI."""
+    run_dir = config.embedder.parent
+    eval_metrics_path = run_dir / "eval_test" / "metrics.json"
+    person_retrieval_path = run_dir / "analysis" / "person_retrieval" / "metrics.json"
+    category_csv = run_dir / "analysis" / "per_tooth" / "per_category_metrics.csv"
+    subgroup_csv = run_dir / "analysis" / "subgroups" / "all_subgroups.csv"
+    config_yaml = run_dir / "config.yaml"
+
+    card: dict = {
+        "checkpoint": str(config.embedder.relative_to(PROJECT_ROOT)),
+        "run_name": run_dir.name,
+    }
+
+    if eval_metrics_path.exists():
+        with open(eval_metrics_path) as f:
+            card["eval_test"] = json.load(f)
+
+    if person_retrieval_path.exists():
+        with open(person_retrieval_path) as f:
+            payload = json.load(f)
+        # Trim to mean-pooling sweep entries (the headline thesis result).
+        sweep = [s for s in payload.get("sweep", []) if s.get("method") == "mean"]
+        sweep.sort(key=lambda s: s["n_query"])
+        card["multi_tooth_sweep"] = sweep
+        # Forensic 1-vs-aggregated, mean gallery only.
+        forensic = [
+            f for f in payload.get("forensic_1tooth", [])
+            if f.get("method") == "single_query_mean_gallery"
+        ]
+        card["forensic_1tooth"] = forensic
+
+    card["per_category"] = _load_csv(category_csv)
+    card["subgroups"] = _load_csv(subgroup_csv)
+
+    if config_yaml.exists():
+        with open(config_yaml) as f:
+            full_cfg = yaml.safe_load(f) or {}
+        card["training"] = {
+            "backbone": full_cfg.get("model", {}).get("backbone"),
+            "embedding_dim": full_cfg.get("model", {}).get("embedding_dim"),
+            "dropout": full_cfg.get("model", {}).get("dropout"),
+            "loss": full_cfg.get("loss", {}).get("type"),
+            "loss_margin": full_cfg.get("loss", {}).get("margin"),
+            "miner": full_cfg.get("miner", {}).get("type"),
+            "optimizer": full_cfg.get("train", {}).get("optimizer"),
+            "lr": full_cfg.get("train", {}).get("lr"),
+            "scheduler": full_cfg.get("train", {}).get("scheduler"),
+            "epochs": full_cfg.get("train", {}).get("epochs"),
+            "weight_decay": full_cfg.get("train", {}).get("weight_decay"),
+            "warmup_epochs": full_cfg.get("train", {}).get("warmup_epochs"),
+            "sampler_p": full_cfg.get("sampler", {}).get("p"),
+            "sampler_k": full_cfg.get("sampler", {}).get("k"),
+            "crop_mode": full_cfg.get("data", {}).get("crop_mode"),
+            "init_from_classifier": full_cfg.get("init_from_classifier"),
+        }
+
+    card["registry_size"] = len(models.registry_index) if models.registry_index else 0
+    return card
+
+
+_model_card_cache: dict | None = None
+
+
+@app.get("/api/model-card")
+def get_model_card() -> dict:
+    """Return all the per-run metrics the UI needs to render the model card."""
+    global _model_card_cache
+    if _model_card_cache is None:
+        _model_card_cache = _build_model_card()
+    return _model_card_cache
 
 
 @app.get("/api/intermediate/{query_id}/{filename}")

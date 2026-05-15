@@ -416,6 +416,25 @@ async def run_pipeline(
 
     top1_top2_gap = float(sims[0] - sims[1]) if len(sims) > 1 else 1.0
     confidence = _confidence_label(float(sims[0]), float(sims[1]) if len(sims) > 1 else 0.0)
+
+    # Per-tooth contribution: dot each tooth's embedding against the top-1
+    # gallery profile. Reveals which teeth carried the match.
+    tooth_contributions: list[dict] = []
+    try:
+        top1_person = results_list[0]["person_id"]
+        top1_faiss_idx = models.registry_index.person_ids.index(top1_person)
+        top1_vec = models.registry_index.index.reconstruct(top1_faiss_idx)
+        per_tooth_sims = embeddings_arr @ top1_vec  # (n_teeth,)
+        for i, fdi in enumerate(fdi_kept):
+            tooth_contributions.append({
+                "fdi": fdi,
+                "fdi_confidence": fdi_conf_kept[i],
+                "similarity_to_top1": float(per_tooth_sims[i]),
+            })
+        tooth_contributions.sort(key=lambda c: c["similarity_to_top1"], reverse=True)
+    except Exception:
+        tooth_contributions = []
+
     timings["total"] = sum(timings.values())
 
     yield {
@@ -428,6 +447,7 @@ async def run_pipeline(
             "timings_ms": {k: round(v, 1) for k, v in timings.items()},
             "n_query_teeth": int(len(embeddings_arr)),
             "n_dropped": len(dropped),
+            "tooth_contributions": tooth_contributions,
         },
     }
 
