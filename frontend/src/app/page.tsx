@@ -10,21 +10,25 @@ import { ResultsCards, type ResultsState } from "@/components/ResultsCards";
 import { useToasts } from "@/components/Toaster";
 import { UploadZone } from "@/components/UploadZone";
 import type { RegistryPerson, StageEvent } from "@/lib/api";
-import { streamIdentify } from "@/lib/identify";
+import { streamIdentify, type PipelineMode } from "@/lib/identify";
+
+const DEFAULT_MODE: PipelineMode = "segmentation";
 
 const INITIAL_PIPELINE: PipelineState = {
-  yolo: "idle",
+  stageA: "idle",
   fdi: "idle",
   embed: "idle",
   search: "idle",
   status: "Drop an X-ray and click Identify to start.",
   currentImageUrl: null,
   warnings: [],
+  mode: DEFAULT_MODE,
 };
 
 export default function Page() {
   const [selected, setSelected] = useState<RegistryPerson | undefined>();
   const [busy, setBusy] = useState(false);
+  const [mode, setMode] = useState<PipelineMode>(DEFAULT_MODE);
   const [pipeline, setPipeline] = useState<PipelineState>(INITIAL_PIPELINE);
   const [results, setResults] = useState<ResultsState | null>(null);
   const registryRef = useRef<RegistryListHandle | null>(null);
@@ -54,6 +58,7 @@ export default function Page() {
         ...INITIAL_PIPELINE,
         status: "Uploading…",
         currentImageUrl: uploadedPreview,
+        mode,
       });
 
       // Scroll the pipeline panel into view so the user actually sees the
@@ -63,7 +68,7 @@ export default function Page() {
       });
 
       try {
-        for await (const evt of streamIdentify(file)) {
+        for await (const evt of streamIdentify(file, { mode })) {
           applyEvent(evt, setPipeline, setResults, selected);
           if (evt.event === "warning") {
             toasts.push({
@@ -101,7 +106,7 @@ export default function Page() {
         setTimeout(() => URL.revokeObjectURL(uploadedPreview), 5000);
       }
     },
-    [selected, toasts],
+    [selected, toasts, mode],
   );
 
   return (
@@ -137,7 +142,12 @@ export default function Page() {
         }}
       />
 
-      <UploadZone busy={busy} onIdentify={onIdentify} />
+      <UploadZone
+        busy={busy}
+        onIdentify={onIdentify}
+        mode={mode}
+        onModeChange={setMode}
+      />
 
       {(busy || pipeline.currentImageUrl || pipeline.error) && (
         <div ref={pipelineRef} className="scroll-mt-4">
@@ -163,6 +173,13 @@ export default function Page() {
   );
 }
 
+function mapStage(name: string): keyof PipelineState | null {
+  // Backend emits "detect" or "segment" for the first stage depending on mode.
+  if (name === "detect" || name === "segment") return "stageA";
+  if (name === "fdi" || name === "embed" || name === "search") return name;
+  return null;
+}
+
 function applyEvent(
   evt: StageEvent,
   setPipeline: React.Dispatch<React.SetStateAction<PipelineState>>,
@@ -171,7 +188,8 @@ function applyEvent(
 ) {
   switch (evt.event) {
     case "stage_start": {
-      const stage = evt.data.stage as keyof PipelineState;
+      const stage = mapStage(evt.data.stage);
+      if (!stage) return;
       setPipeline((prev) => ({
         ...prev,
         [stage]: "active",
@@ -195,7 +213,9 @@ function applyEvent(
       return;
     }
     case "stage_complete": {
-      const stage = evt.data.stage as keyof PipelineState;
+      const rawStage = evt.data.stage;
+      const stage = mapStage(rawStage);
+      if (!stage) return;
       setPipeline((prev) => ({
         ...prev,
         [stage]: "done",

@@ -58,6 +58,20 @@ type SubgroupRow = {
   mAP: number;
 };
 
+type YoloMetrics = {
+  checkpoint: string;
+  task: "detect" | "segment";
+  split: string;
+  imgsz: number;
+  box: { precision: number; recall: number; map50: number; map50_95: number };
+  mask?: { precision: number; recall: number; map50: number; map50_95: number };
+};
+
+type YoloSummary = {
+  detection?: YoloMetrics;
+  segmentation?: YoloMetrics;
+};
+
 type TrainingFacts = {
   backbone?: string;
   embedding_dim?: number;
@@ -81,12 +95,14 @@ type ModelCardPayload = {
   checkpoint: string;
   run_name: string;
   registry_size: number;
+  default_mode?: "segmentation" | "detection";
   eval_test?: { verification: VerificationMetrics; retrieval: RetrievalMetrics };
   multi_tooth_sweep?: SweepEntry[];
   forensic_1tooth?: SweepEntry[];
   per_category?: CategoryRow[];
   subgroups?: SubgroupRow[];
   training?: TrainingFacts;
+  yolo?: YoloSummary;
 };
 
 const PRETTY_SUBGROUP: Record<string, string> = {
@@ -179,6 +195,9 @@ function ModelCardBody({ data }: { data: ModelCardPayload }) {
   return (
     <>
       <Header data={data} />
+      {data.yolo && (data.yolo.detection || data.yolo.segmentation) && (
+        <YoloBlock yolo={data.yolo} defaultMode={data.default_mode} />
+      )}
       {data.eval_test && <SingleToothBlock metrics={data.eval_test} />}
       {data.multi_tooth_sweep && data.multi_tooth_sweep.length > 0 && (
         <MultiToothBlock sweep={data.multi_tooth_sweep} />
@@ -212,6 +231,95 @@ function SectionTitle({ title, hint }: { title: string; hint?: string }) {
       {title}
       {hint && <InfoHint text={hint} />}
     </h3>
+  );
+}
+
+function YoloBlock({
+  yolo,
+  defaultMode,
+}: {
+  yolo: YoloSummary;
+  defaultMode?: "segmentation" | "detection";
+}) {
+  type Row = {
+    name: string;
+    isDefault: boolean;
+    task: "detect" | "segment";
+    checkpoint: string;
+    metrics: { precision: number; recall: number; map50: number; map50_95: number };
+    metricsLabel: "Box" | "Mask";
+  };
+  const rows: Row[] = [];
+  if (yolo.detection) {
+    rows.push({
+      name: "Detection (bbox)",
+      isDefault: defaultMode === "detection",
+      task: "detect",
+      checkpoint: yolo.detection.checkpoint,
+      metrics: yolo.detection.box,
+      metricsLabel: "Box",
+    });
+  }
+  if (yolo.segmentation) {
+    // Show mask metrics for the segmenter — the box numbers are reported as
+    // the secondary in a footnote since identification only needs the bbox.
+    rows.push({
+      name: "Segmentation (instance masks)",
+      isDefault: defaultMode === "segmentation",
+      task: "segment",
+      checkpoint: yolo.segmentation.checkpoint,
+      metrics: yolo.segmentation.mask ?? yolo.segmentation.box,
+      metricsLabel: yolo.segmentation.mask ? "Mask" : "Box",
+    });
+  }
+
+  return (
+    <div>
+      <SectionTitle
+        title="Tooth localiser (YOLO)"
+        hint="Two YOLO models are deployed. The user picks the backend for each query. Detection returns bounding boxes; segmentation returns instance masks whose tight bbox is used as the crop — closer to the GT-mask crops used during embedder training."
+      />
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            <tr>
+              <th className="py-1 text-left">Model</th>
+              <th className="py-1 text-right">Precision</th>
+              <th className="py-1 text-right">Recall</th>
+              <th className="py-1 text-right">mAP50</th>
+              <th className="py-1 text-right">mAP50-95</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.name} className="border-t border-slate-100 dark:border-slate-800">
+                <td className="py-2">
+                  <div className="font-medium">
+                    {row.name}
+                    {row.isDefault && (
+                      <span className="ml-2 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">
+                        Default
+                      </span>
+                    )}
+                  </div>
+                  <div className="font-mono text-xs text-slate-500 dark:text-slate-400">
+                    {row.metricsLabel} metrics · {row.checkpoint}
+                  </div>
+                </td>
+                <td className="py-2 text-right font-mono tabular-nums">{fmtPct(row.metrics.precision, 1)}</td>
+                <td className="py-2 text-right font-mono tabular-nums">{fmtPct(row.metrics.recall, 1)}</td>
+                <td className="py-2 text-right font-mono tabular-nums">{fmtPct(row.metrics.map50, 1)}</td>
+                <td className="py-2 text-right font-mono tabular-nums">{fmtPct(row.metrics.map50_95, 1)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+        Metrics computed on the validation split (179 panoramics). Single class
+        (<code>tooth</code>).
+      </p>
+    </div>
   );
 }
 

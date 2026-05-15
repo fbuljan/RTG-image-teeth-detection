@@ -2,12 +2,20 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { InfoHint } from "@/components/InfoHint";
+import type { PipelineMode } from "@/lib/identify";
+
 type Props = {
   onIdentify: (file: File) => void;
   busy: boolean;
+  mode: PipelineMode;
+  onModeChange: (mode: PipelineMode) => void;
 };
 
-export function UploadZone({ onIdentify, busy }: Props) {
+const MODE_HINT =
+  "Detection runs a YOLO bounding-box detector (~99% box mAP50). Segmentation runs a YOLO instance segmenter (~95% mask mAP50) and uses the tight bbox of each predicted mask as the crop — closer to the GT-mask crops the embedder was trained on.";
+
+export function UploadZone({ onIdentify, busy, mode, onModeChange }: Props) {
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [hovering, setHovering] = useState(false);
@@ -35,11 +43,45 @@ export function UploadZone({ onIdentify, busy }: Props) {
 
   return (
     <section className="rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
-      <header className="border-b border-slate-200 px-6 py-4 dark:border-slate-800">
-        <h2 className="text-lg font-semibold">Upload X-ray</h2>
-        <p className="text-sm text-slate-500 dark:text-slate-400">
-          Drag the X-ray you just downloaded here, then click <em>Identify</em>.
-        </p>
+      <header className="flex flex-col gap-3 border-b border-slate-200 px-6 py-4 dark:border-slate-800 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Upload X-ray</h2>
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            Drag the X-ray you just downloaded here, then click <em>Identify</em>.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            Cropping
+          </span>
+          <InfoHint text={MODE_HINT} />
+          <div
+            role="radiogroup"
+            aria-label="Cropping backend"
+            className="inline-flex rounded-full border border-slate-200 bg-slate-100 p-0.5 text-xs dark:border-slate-700 dark:bg-slate-800"
+          >
+            {(["segmentation", "detection"] as PipelineMode[]).map((m) => {
+              const active = mode === m;
+              return (
+                <button
+                  key={m}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  disabled={busy}
+                  onClick={() => onModeChange(m)}
+                  className={`rounded-full px-3 py-1 font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                    active
+                      ? "bg-white text-slate-900 shadow dark:bg-slate-950 dark:text-slate-100"
+                      : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100"
+                  }`}
+                >
+                  {m === "segmentation" ? "Segmentation" : "Detection"}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </header>
 
       <div

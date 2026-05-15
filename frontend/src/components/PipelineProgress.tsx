@@ -5,7 +5,7 @@ import { intermediateUrl } from "@/lib/api";
 export type StageState = "idle" | "active" | "done";
 
 export type PipelineState = {
-  yolo: StageState;
+  stageA: StageState;
   fdi: StageState;
   embed: StageState;
   search: StageState;
@@ -15,18 +15,28 @@ export type PipelineState = {
   currentImageUrl: string | null;
   embedProgress?: { current: number; total: number };
   toothCount?: number;
+  mode: "detection" | "segmentation";
 };
 
 type Props = {
   state: PipelineState;
 };
 
-const STAGES: Array<{ key: keyof PipelineState; label: string }> = [
-  { key: "yolo", label: "Detect" },
-  { key: "fdi", label: "Number" },
-  { key: "embed", label: "Embed" },
-  { key: "search", label: "Search" },
+const STAGE_KEYS: Array<{ key: keyof PipelineState }> = [
+  { key: "stageA" },
+  { key: "fdi" },
+  { key: "embed" },
+  { key: "search" },
 ];
+
+const STAGE_LABELS: Record<keyof PipelineState, string> | Record<string, string> = {};
+function labelFor(key: string, mode: "detection" | "segmentation"): string {
+  if (key === "stageA") return mode === "segmentation" ? "Segment" : "Detect";
+  if (key === "fdi") return "Number";
+  if (key === "embed") return "Embed";
+  if (key === "search") return "Search";
+  return key;
+}
 
 export function PipelineProgress({ state }: Props) {
   const showProgress =
@@ -42,7 +52,7 @@ export function PipelineProgress({ state }: Props) {
           <p className="text-sm text-slate-500 dark:text-slate-400">{state.status}</p>
         </div>
         <ol className="flex items-center gap-2 text-xs">
-          {STAGES.map(({ key, label }) => {
+          {STAGE_KEYS.map(({ key }) => {
             const stage = state[key] as StageState;
             const tone =
               stage === "done"
@@ -52,7 +62,7 @@ export function PipelineProgress({ state }: Props) {
                 : "bg-slate-200 text-slate-500 dark:bg-slate-800 dark:text-slate-400";
             return (
               <li key={key} className={`rounded-full px-3 py-1 font-medium ${tone}`}>
-                {label}
+                {labelFor(key, state.mode)}
                 {key === "embed" && showProgress ? ` ${showProgress}` : ""}
               </li>
             );
