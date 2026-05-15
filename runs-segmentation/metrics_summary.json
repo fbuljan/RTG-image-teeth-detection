@@ -1,0 +1,32 @@
+{
+  "detection": {
+    "checkpoint": "runs-detection/train3/weights/best.pt",
+    "task": "detect",
+    "split": "val",
+    "imgsz": 640,
+    "box": {
+      "precision": 0.9817986894643304,
+      "recall": 0.987678331683479,
+      "map50": 0.9864628915881185,
+      "map50_95": 0.8218847524818799
+    }
+  },
+  "segmentation": {
+    "checkpoint": "runs-segmentation/default-seg/weights/best.pt",
+    "task": "segment",
+    "split": "val",
+    "imgsz": 640,
+    "box": {
+      "precision": 0.9375024226782959,
+      "recall": 0.9486026341150016,
+      "map50": 0.9688956473500641,
+      "map50_95": 0.7216493162966273
+    },
+    "mask": {
+      "precision": 0.9193126445324389,
+      "recall": 0.9206553164150337,
+      "map50": 0.9464210362049663,
+      "map50_95": 0.5760041595188096
+    }
+  }
+}
