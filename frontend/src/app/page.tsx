@@ -3,6 +3,7 @@
 import { useCallback, useRef, useState } from "react";
 
 import { ExamplePicks } from "@/components/ExamplePicks";
+import { ModelCard } from "@/components/ModelCard";
 import { PipelineProgress, type PipelineState } from "@/components/PipelineProgress";
 import { RegistryList, type RegistryListHandle } from "@/components/RegistryList";
 import { ResultsCards, type ResultsState } from "@/components/ResultsCards";
@@ -156,6 +157,8 @@ export default function Page() {
           />
         </div>
       )}
+
+      <ModelCard />
     </main>
   );
 }
@@ -208,6 +211,7 @@ function applyEvent(
           timings: evt.data.timings_ms ?? {},
           nQueryTeeth: evt.data.n_query_teeth ?? 0,
           nDropped: evt.data.n_dropped ?? 0,
+          toothContributions: evt.data.tooth_contributions,
           selectedPersonId: selected?.person_id,
           selectedFakeName: selected?.fake_name,
         });

@@ -1,7 +1,7 @@
 "use client";
 
 import { InfoHint } from "@/components/InfoHint";
-import type { SearchResult } from "@/lib/api";
+import type { SearchResult, ToothContribution } from "@/lib/api";
 
 export type ResultsState = {
   results: SearchResult[];
@@ -10,6 +10,7 @@ export type ResultsState = {
   timings: Record<string, number>;
   nQueryTeeth: number;
   nDropped: number;
+  toothContributions?: ToothContribution[];
   selectedPersonId?: string;
   selectedFakeName?: string;
 };
@@ -173,20 +174,32 @@ export function ResultsCards({ state, onReset }: Props) {
         <summary className="cursor-pointer font-medium text-slate-700 dark:text-slate-200">
           Technical details
         </summary>
-        <dl className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {Object.entries(state.timings).map(([k, v]) => (
-            <div key={k}>
-              <dt className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                {k}
-              </dt>
-              <dd className="font-mono text-sm">{v.toFixed(1)} ms</dd>
-            </div>
-          ))}
-        </dl>
-        <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
-          Aggregation: mean pooling · embedder: FDI-init · gallery size: 1,178
-          persons.
-        </p>
+
+        <div className="mt-3 space-y-4">
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Pipeline timings (ms)
+            </h4>
+            <dl className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {Object.entries(state.timings).map(([k, v]) => (
+                <div key={k}>
+                  <dt className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    {k}
+                  </dt>
+                  <dd className="font-mono text-sm tabular-nums">{v.toFixed(1)}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+
+          {state.toothContributions && state.toothContributions.length > 0 && (
+            <ToothContributions contributions={state.toothContributions} />
+          )}
+
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            Aggregation: mean pooling · embedder: FDI-init · gallery size: 1,178 persons.
+          </p>
+        </div>
       </details>
 
       <footer className="border-t border-slate-200 px-6 py-3 text-right dark:border-slate-800">
@@ -199,5 +212,66 @@ export function ResultsCards({ state, onReset }: Props) {
         </button>
       </footer>
     </section>
+  );
+}
+
+const CONTRIBUTION_HINT =
+  "For each detected tooth, the dot product of its individual embedding with the top-1 person's gallery profile. Higher = that tooth pushed harder toward this match. Sorted by contribution.";
+
+function ToothContributions({ contributions }: { contributions: ToothContribution[] }) {
+  const minSim = Math.min(...contributions.map((c) => c.similarity_to_top1));
+  const maxSim = Math.max(...contributions.map((c) => c.similarity_to_top1));
+  const range = Math.max(1e-6, maxSim - minSim);
+
+  return (
+    <div>
+      <h4 className="flex items-center text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+        Per-tooth contribution to the top match
+        <InfoHint text={CONTRIBUTION_HINT} />
+      </h4>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-xs text-slate-400 dark:text-slate-500">
+            <tr>
+              <th className="py-1 text-left">FDI</th>
+              <th className="py-1 text-right">Similarity → top-1</th>
+              <th className="py-1 text-left pl-3">&nbsp;</th>
+              <th className="py-1 text-right">FDI confidence</th>
+            </tr>
+          </thead>
+          <tbody>
+            {contributions.map((c, i) => {
+              const widthPct = Math.max(
+                4,
+                Math.round(((c.similarity_to_top1 - minSim) / range) * 100),
+              );
+              const isTop = i < 3;
+              return (
+                <tr
+                  key={`${c.fdi}-${i}`}
+                  className="border-t border-slate-100 dark:border-slate-800"
+                >
+                  <td className="py-1 font-mono">{c.fdi}</td>
+                  <td className="py-1 text-right font-mono tabular-nums">
+                    {c.similarity_to_top1.toFixed(4)}
+                  </td>
+                  <td className="py-1 pl-3">
+                    <div className="h-2 w-32 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                      <div
+                        className={`h-full ${isTop ? "bg-emerald-500" : "bg-slate-400"}`}
+                        style={{ width: `${widthPct}%` }}
+                      />
+                    </div>
+                  </td>
+                  <td className="py-1 text-right font-mono tabular-nums">
+                    {(c.fdi_confidence * 100).toFixed(0)}%
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
