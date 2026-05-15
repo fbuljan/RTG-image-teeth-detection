@@ -20,7 +20,7 @@ import uuid
 from pathlib import Path
 
 import yaml
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
@@ -192,7 +192,14 @@ def _build_model_card() -> dict:
             "init_from_classifier": full_cfg.get("init_from_classifier"),
         }
 
+    # YOLO detector + segmenter metrics from the saved validation summary.
+    yolo_summary_path = PROJECT_ROOT / "runs-segmentation" / "metrics_summary.json"
+    if yolo_summary_path.exists():
+        with open(yolo_summary_path) as f:
+            card["yolo"] = json.load(f)
+
     card["registry_size"] = len(models.registry_index) if models.registry_index else 0
+    card["default_mode"] = config.default_mode
     return card
 
 
@@ -220,9 +227,18 @@ def serve_intermediate(query_id: str, filename: str):
 
 
 @app.post("/api/identify")
-async def identify(file: UploadFile = File(...)) -> EventSourceResponse:
-    """Run the identification pipeline on the uploaded image, stream SSE events."""
+async def identify(
+    file: UploadFile = File(...),
+    mode: str = Form("segmentation"),
+) -> EventSourceResponse:
+    """Run the identification pipeline on the uploaded image, stream SSE events.
+
+    `mode` selects between "detection" and "segmentation" YOLO backends.
+    """
     cleanup_temp_dir(config.temp_dir)
+
+    if mode not in ("detection", "segmentation"):
+        mode = config.default_mode
 
     query_id = uuid.uuid4().hex[:12]
     query_dir = config.temp_dir / query_id
@@ -234,7 +250,7 @@ async def identify(file: UploadFile = File(...)) -> EventSourceResponse:
 
     async def event_stream():
         try:
-            async for event in run_pipeline(upload_path, query_id, models):
+            async for event in run_pipeline(upload_path, query_id, models, mode=mode):
                 yield {
                     "event": event["event"],
                     "data": json.dumps(event["data"]),

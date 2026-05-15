@@ -27,7 +27,11 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from backend.visualization import render_fdi_overlay, render_yolo_overlay
+from backend.visualization import (
+    render_fdi_overlay,
+    render_segmentation_overlay,
+    render_yolo_overlay,
+)
 from identification.data.tooth_dataset import IMAGENET_MEAN, IMAGENET_STD
 from identification.evaluation.evaluate_embedding import load_checkpoint as load_embedder_checkpoint
 from identification.models.classifier import ToothClassifier
@@ -42,6 +46,7 @@ class PipelineConfig:
     """Per-server configuration that drives the pipeline."""
 
     yolo_weights: Path = PROJECT_ROOT / "runs-detection/train3/weights/best.pt"
+    yolo_seg_weights: Path = PROJECT_ROOT / "runs-segmentation/default-seg/weights/best.pt"
     fdi_classifier: Path = PROJECT_ROOT / "identification/runs/tooth_fdi_raw/best.pt"
     embedder: Path = PROJECT_ROOT / "identification/runs/embedding_fdi_init_v1/best.pt"
     registry_dir: Path = PROJECT_ROOT / "identification/registry"
@@ -52,6 +57,7 @@ class PipelineConfig:
     top_k: int = 5
     crop_size: int = 224
     min_teeth_warning: int = 4
+    default_mode: str = "segmentation"  # or "detection"
     # On MPS the whole pipeline runs in ~1 second, which is too fast for the
     # user to see the stage overlays flash by. Enforce a minimum dwell time
     # per stage so each visualization is actually visible during the demo.
@@ -71,6 +77,7 @@ class PipelineModels:
 
     config: PipelineConfig
     yolo: Any = None
+    yolo_seg: Any = None
     fdi_classifier: ToothClassifier | None = None
     fdi_label_inv: dict[int, str] = field(default_factory=dict)
     embedder: torch.nn.Module | None = None
@@ -84,10 +91,13 @@ class PipelineModels:
         self.device = self.config.device()
         print(f"[pipeline] device={self.device}")
 
-        # 1. YOLO detector
+        # 1. YOLO detector and segmenter — both loaded so the user can switch
+        # modes per query without paying a reload.
         from ultralytics import YOLO  # local import to avoid loading until needed
-        print(f"[pipeline] loading YOLO from {self.config.yolo_weights}")
+        print(f"[pipeline] loading YOLO detector from {self.config.yolo_weights}")
         self.yolo = YOLO(str(self.config.yolo_weights))
+        print(f"[pipeline] loading YOLO segmenter from {self.config.yolo_seg_weights}")
+        self.yolo_seg = YOLO(str(self.config.yolo_seg_weights))
 
         # 2. FDI classifier
         print(f"[pipeline] loading FDI classifier from {self.config.fdi_classifier}")
@@ -200,25 +210,41 @@ async def run_pipeline(
     panoramic_path: Path,
     query_id: str,
     models: PipelineModels,
+    mode: str = "segmentation",
 ) -> AsyncGenerator[dict, None]:
     """Stream pipeline events as the query is processed.
 
     Each yielded dict is `{"event": <name>, "data": <json-serializable>}` and is
     converted to an SSE message by the caller.
+
+    `mode` selects between two YOLO backends:
+      * "detection" — runs the bbox-only detector; crops are taken from xyxy boxes.
+      * "segmentation" — runs the seg model; crops use the tight bbox of each
+        predicted mask (which more closely matches the GT-mask-based crops used
+        during embedder training).
     """
     cfg = models.config
     device = models.device
     query_dir = cfg.temp_dir / query_id
     query_dir.mkdir(parents=True, exist_ok=True)
 
+    if mode not in ("detection", "segmentation"):
+        mode = cfg.default_mode
+
     timings: dict[str, float] = {}
+    polygons: list[np.ndarray] = []  # only populated in segmentation mode
 
     # --- Stage A: YOLO ---
+    stage_name = "detect" if mode == "detection" else "segment"
+    stage_message = (
+        "Detecting teeth..." if mode == "detection" else "Segmenting teeth..."
+    )
     t0 = time.perf_counter()
-    yield {"event": "stage_start", "data": {"stage": "yolo", "message": "Detecting teeth..."}}
+    yield {"event": "stage_start", "data": {"stage": stage_name, "message": stage_message, "mode": mode}}
     await asyncio.sleep(0)
 
-    results = models.yolo.predict(
+    yolo_model = models.yolo if mode == "detection" else models.yolo_seg
+    results = yolo_model.predict(
         source=str(panoramic_path),
         conf=cfg.yolo_conf,
         iou=cfg.yolo_iou,
@@ -230,29 +256,51 @@ async def run_pipeline(
         yield {"event": "error", "data": {"message": "YOLO returned no results."}}
         return
 
-    boxes = results[0].boxes
+    res0 = results[0]
+    boxes = res0.boxes
     if boxes is None or boxes.xyxy is None or len(boxes.xyxy) == 0:
         yield {"event": "error", "data": {"message": "No teeth found in this image. Is it a panoramic X-ray?"}}
         return
 
     bboxes = boxes.xyxy.cpu().numpy()  # (N, 4): x1, y1, x2, y2
     confidences = boxes.conf.cpu().numpy() if boxes.conf is not None else np.ones(len(bboxes))
+
+    if mode == "segmentation":
+        masks_obj = getattr(res0, "masks", None)
+        if masks_obj is None or masks_obj.xy is None or len(masks_obj.xy) == 0:
+            yield {"event": "error", "data": {"message": "Segmenter found no tooth masks."}}
+            return
+        polygons = [np.asarray(p) for p in masks_obj.xy]
+        # Replace YOLO's bbox with the tight bbox of each mask polygon — gives
+        # crops closer to the GT-mask-bbox + 10% padding used during embedder
+        # training.
+        derived = []
+        for poly in polygons:
+            xs, ys = poly[:, 0], poly[:, 1]
+            derived.append([float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())])
+        bboxes = np.asarray(derived)
+
     n_teeth = len(bboxes)
 
-    yolo_overlay = query_dir / "yolo_overlay.png"
-    render_yolo_overlay(panoramic_path, bboxes.tolist(), yolo_overlay)
-    timings["yolo"] = (time.perf_counter() - t0) * 1000
+    overlay_filename = f"{stage_name}_overlay.png"
+    overlay_path = query_dir / overlay_filename
+    if mode == "segmentation":
+        render_segmentation_overlay(panoramic_path, polygons, overlay_path)
+    else:
+        render_yolo_overlay(panoramic_path, bboxes.tolist(), overlay_path)
+    timings[stage_name] = (time.perf_counter() - t0) * 1000
 
     yield {
         "event": "stage_complete",
         "data": {
-            "stage": "yolo",
+            "stage": stage_name,
+            "mode": mode,
             "n_teeth": int(n_teeth),
-            "annotated_image_url": f"/api/intermediate/{query_id}/yolo_overlay.png",
-            "elapsed_ms": round(timings["yolo"], 1),
+            "annotated_image_url": f"/api/intermediate/{query_id}/{overlay_filename}",
+            "elapsed_ms": round(timings[stage_name], 1),
         },
     }
-    await _dwell(timings["yolo"], cfg.min_stage_dwell_ms)
+    await _dwell(timings[stage_name], cfg.min_stage_dwell_ms)
 
     if n_teeth < cfg.min_teeth_warning:
         yield {
@@ -307,11 +355,20 @@ async def run_pipeline(
     fdi_kept = [fdi_labels[i] for i in keep_indices]
     fdi_conf_kept = [float(fdi_confidences[i]) for i in keep_indices]
     crops_kept = [crops[i] for i in keep_indices]
+    polygons_kept = (
+        [polygons[i] for i in keep_indices] if polygons else None
+    )
 
     n_uncertain = int(sum(1 for c in fdi_conf_kept if c < 0.5))
 
     fdi_overlay = query_dir / "fdi_overlay.png"
-    render_fdi_overlay(panoramic_path, bboxes_kept.tolist(), fdi_kept, fdi_overlay)
+    render_fdi_overlay(
+        panoramic_path,
+        bboxes_kept.tolist(),
+        fdi_kept,
+        fdi_overlay,
+        polygons=polygons_kept,
+    )
     timings["fdi"] = (time.perf_counter() - t0) * 1000
 
     yield {
