@@ -14,8 +14,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -177,7 +177,8 @@ cython_debug/
 
 .DS_STORE
 /visualizations
-/runs-segmentation
+/runs-segmentation/*
+!/runs-segmentation/metrics_summary.json
 
 # Claude Code
 CLAUDE.md
