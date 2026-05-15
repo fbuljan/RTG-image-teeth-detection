@@ -189,6 +189,15 @@ identification/data/review_grid.png
 identification/data/plots/
 identification/runs/
 identification/docs/
+identification/registry/
+
+# Phase 6 demo
+backend/temp/
+backend/__pycache__/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+.demo_logs/
 
 # Claude local state
 .claude/
