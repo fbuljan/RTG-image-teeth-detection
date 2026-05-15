@@ -1,0 +1,67 @@
+// Streaming SSE client for /api/identify.
+//
+// FastAPI's EventSourceResponse only supports GET when consumed via the
+// browser's `EventSource` constructor. We need to POST a multipart upload, so
+// we manually parse the chunked text/event-stream response from `fetch`.
+
+import { API_BASE, type StageEvent } from "./api";
+
+export type PipelineMode = "detection" | "segmentation";
+
+export async function* streamIdentify(
+  file: File,
+  options: { mode?: PipelineMode; signal?: AbortSignal } = {},
+): AsyncGenerator<StageEvent> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("mode", options.mode ?? "segmentation");
+
+  const res = await fetch(`${API_BASE}/api/identify`, {
+    method: "POST",
+    body: form,
+    signal: options.signal,
+  });
+  if (!res.ok || !res.body) {
+    throw new Error(`Pipeline request failed: ${res.status}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  // Normalize CRLF → LF up front so the buffer split only needs to look for
+  // "\n\n". sse-starlette emits "\r\n\r\n" between events; the bare "\n\n"
+  // check we used to do would never match and the stream would silently stall.
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+
+    let idx;
+    while ((idx = buffer.indexOf("\n\n")) !== -1) {
+      const chunk = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      const parsed = parseSse(chunk);
+      if (parsed) yield parsed as StageEvent;
+    }
+  }
+}
+
+function parseSse(chunk: string): StageEvent | null {
+  let event = "";
+  const dataLines: string[] = [];
+  for (const line of chunk.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice("event:".length).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice("data:".length).trim());
+  }
+  if (!event) return null;
+  let data: unknown = {};
+  if (dataLines.length) {
+    try {
+      data = JSON.parse(dataLines.join("\n"));
+    } catch {
+      data = { raw: dataLines.join("\n") };
+    }
+  }
+  return { event, data } as StageEvent;
+}
