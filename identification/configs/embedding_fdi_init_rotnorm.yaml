@@ -1,0 +1,60 @@
+# Phase 8.1 — FDI-init embedder retrained on rotation-canonicalised crops.
+# Mirrors configs/embedding_fdi_init.yaml (the deployed embedder's config) with:
+# - manifest swapped to manifest_clean_rotnorm.csv
+# - init_from_classifier swapped to the rotnorm-retrained FDI classifier
+# - rotation_degrees bumped to 20
+# - new output dir
+experiment_name: embedding_fdi_init_rotnorm_v1
+init_from_classifier: identification/runs/tooth_fdi_rotnorm/best.pt
+
+data:
+  crop_mode: raw
+  manifest: identification/data/manifest_clean_rotnorm.csv
+  num_workers: 0
+  pin_memory: false
+  target_col: person_id
+
+model:
+  backbone: resnet18
+  dropout: 0.2
+  embedding_dim: 128
+  pretrained: true
+
+loss:
+  margin: 0.2
+  type: triplet_margin
+
+miner:
+  epsilon: 0.1
+  type: multi_similarity
+
+sampler:
+  k: 4
+  p: 16
+
+train:
+  epochs: 60
+  lr: 0.0001
+  optimizer: AdamW
+  scheduler: cosine
+  warmup_epochs: 2
+  weight_decay: 0.01
+
+augmentation:
+  rotation_degrees: 20
+  translate: 0.05
+  brightness: 0.1
+  contrast: 0.1
+  blur_kernel: 3
+  blur_sigma_max: 0.5
+  noise_sigma: 0.01
+
+eval:
+  patience: 10
+  save_best_metric: rank1
+  val_every_n_epochs: 3
+
+output:
+  dir: identification/runs/embedding_fdi_init_rotnorm_v1
+  save_best: true
+  save_last: true
