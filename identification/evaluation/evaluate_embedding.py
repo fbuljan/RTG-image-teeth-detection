@@ -57,10 +57,15 @@ def load_checkpoint(checkpoint_path: str, device: str):
     return model, cfg, label_map, ckpt
 
 
-def build_eval_dataset(cfg, split, label_map, ckpt=None, uses_metadata=False, filter_fn=None):
-    """Build a ToothDataset for evaluation, handling metadata variant."""
+def build_eval_dataset(cfg, split, label_map, ckpt=None, uses_metadata=False, filter_fn=None,
+                        manifest_override=None):
+    """Build a ToothDataset for evaluation, handling metadata variant.
+
+    `manifest_override` lets callers swap in a different manifest (e.g.
+    manifest_yolo.csv) without modifying the embedder's training config.
+    """
     return ToothDataset(
-        manifest_path=cfg["data"]["manifest"],
+        manifest_path=manifest_override or cfg["data"]["manifest"],
         split=split,
         crop_mode=cfg["data"]["crop_mode"],
         target_col=cfg["data"]["target_col"],

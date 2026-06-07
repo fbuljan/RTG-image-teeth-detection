@@ -42,9 +42,15 @@ DEFAULT_CHECKPOINT = "identification/runs/embedding_fdi_init_v1/best.pt"
 DEFAULT_OUTPUT_DIR = "identification/registry"
 
 
-def build_full_dataset(cfg, label_map, ckpt, uses_metadata):
-    """ToothDataset spanning every split — full registry coverage."""
-    df = pd.read_csv(cfg["data"]["manifest"], dtype=str)
+def build_full_dataset(cfg, label_map, ckpt, uses_metadata, manifest_override=None):
+    """ToothDataset spanning every split — full registry coverage.
+
+    `manifest_override` lets the caller swap in a different manifest (e.g. the
+    YOLO-cropped one for the Phase 7.1 ensemble) without touching the embedder's
+    training config.
+    """
+    manifest_path = manifest_override or cfg["data"]["manifest"]
+    df = pd.read_csv(manifest_path, dtype=str)
     all_persons = df["person_id"].unique().tolist()
     if label_map is None or set(label_map.keys()) < set(all_persons):
         # Re-build label_map across all splits so train+val+test persons all have labels
@@ -54,7 +60,7 @@ def build_full_dataset(cfg, label_map, ckpt, uses_metadata):
     for split in ("train", "val", "test"):
         try:
             ds = ToothDataset(
-                manifest_path=cfg["data"]["manifest"],
+                manifest_path=manifest_path,
                 split=split,
                 crop_mode=cfg["data"]["crop_mode"],
                 target_col="person_id",
@@ -88,6 +94,9 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--device", default=None,
                         help="Device override; defaults to MPS/CUDA/CPU autoselection.")
+    parser.add_argument("--manifest", default=None,
+                        help="Override the embedder's training manifest with this one "
+                             "(e.g. manifest_yolo.csv for the YOLO-aligned ensemble).")
     args = parser.parse_args()
 
     device = args.device or ("mps" if torch.backends.mps.is_available()
@@ -100,7 +109,11 @@ def main() -> None:
     print(f"Model: {'metadata-fused ' if uses_metadata else ''}embedder, dim={model.projection_head.out_features}")
 
     print("\n1. Loading dataset (all splits)...")
-    dataset, label_map = build_full_dataset(cfg, label_map, ckpt, uses_metadata)
+    if args.manifest:
+        print(f"   Manifest override: {args.manifest}")
+    dataset, label_map = build_full_dataset(
+        cfg, label_map, ckpt, uses_metadata, manifest_override=args.manifest,
+    )
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
     print(f"   Total tooth crops: {len(dataset)}")
     print(f"   Distinct persons (label_map): {len(label_map)}")
@@ -123,7 +136,7 @@ def main() -> None:
         print(f"   {n_collisions} name collisions disambiguated with numeric suffix")
 
     print("\n5. Verifying panoramic source files...")
-    df = pd.read_csv(cfg["data"]["manifest"], dtype=str)
+    df = pd.read_csv(args.manifest or cfg["data"]["manifest"], dtype=str)
     image_id_by_person = (
         df.drop_duplicates("person_id").set_index("person_id")["image_id"].to_dict()
     )
