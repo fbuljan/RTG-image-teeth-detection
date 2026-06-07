@@ -198,8 +198,46 @@ def _build_model_card() -> dict:
         with open(yolo_summary_path) as f:
             card["yolo"] = json.load(f)
 
+    # Phase 7.1 ensemble metrics — both the GT-crop eval and the YOLO-crop
+    # deployment-aligned eval (saved by evaluate_ensemble.py with --manifest).
+    def _load_ensemble_payload(rel_path: str) -> dict | None:
+        path = PROJECT_ROOT / rel_path
+        if not path.exists():
+            return None
+        with open(path) as f:
+            payload = json.load(f)
+        sweep = [s for s in payload.get("sweep", []) if s.get("method") == "mean"]
+        sweep.sort(key=lambda s: s["n_query"])
+        forensic = [
+            f for f in payload.get("forensic_1tooth", [])
+            if f.get("method", "").startswith("single_query_mean")
+        ]
+        peak_per_method: dict[str, dict] = {}
+        for s in payload.get("sweep", []):
+            if s.get("n_query") == 16:
+                peak_per_method[s["method"]] = s
+        return {
+            "members": list(payload.get("checkpoints", {}).keys()),
+            "weights": payload.get("weights"),
+            "multi_tooth_sweep": sweep,
+            "forensic_1tooth": forensic,
+            "peak_per_method": peak_per_method,
+        }
+
+    gt_ensemble = _load_ensemble_payload(
+        "identification/runs/ensemble_v1/analysis/person_retrieval/metrics.json"
+    )
+    yolo_ensemble = _load_ensemble_payload(
+        "identification/runs/ensemble_v1/analysis/person_retrieval_yolo/metrics.json"
+    )
+    if gt_ensemble is not None:
+        card["ensemble"] = gt_ensemble  # headline / thesis numbers
+    if yolo_ensemble is not None:
+        card["ensemble_yolo"] = yolo_ensemble  # deployment-aligned numbers
+
     card["registry_size"] = len(models.registry_index) if models.registry_index else 0
     card["default_mode"] = config.default_mode
+    card["ensemble_available"] = bool(models.ensemble_models)
     return card
 
 
@@ -234,11 +272,14 @@ async def identify(
     """Run the identification pipeline on the uploaded image, stream SSE events.
 
     `mode` selects between "detection" and "segmentation" YOLO backends.
+    The ensemble path is intentionally not exposed to the live demo (kept as
+    an offline experiment); single-model FDI-init is the only deployed mode.
     """
     cleanup_temp_dir(config.temp_dir)
 
     if mode not in ("detection", "segmentation"):
         mode = config.default_mode
+    ensemble_flag = False
 
     query_id = uuid.uuid4().hex[:12]
     query_dir = config.temp_dir / query_id
@@ -250,7 +291,9 @@ async def identify(
 
     async def event_stream():
         try:
-            async for event in run_pipeline(upload_path, query_id, models, mode=mode):
+            async for event in run_pipeline(
+                upload_path, query_id, models, mode=mode, ensemble=ensemble_flag,
+            ):
                 yield {
                     "event": event["event"],
                     "data": json.dumps(event["data"]),

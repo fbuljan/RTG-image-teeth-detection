@@ -50,6 +50,18 @@ class PipelineConfig:
     fdi_classifier: Path = PROJECT_ROOT / "identification/runs/tooth_fdi_raw/best.pt"
     embedder: Path = PROJECT_ROOT / "identification/runs/embedding_fdi_init_v1/best.pt"
     registry_dir: Path = PROJECT_ROOT / "identification/registry"
+    # Ensemble: per-model checkpoints + per-model registry directories. The
+    # backend loads each one and ensembles cosine similarities at search time.
+    ensemble_checkpoints: dict[str, Path] = field(default_factory=lambda: {
+        "baseline": PROJECT_ROOT / "identification/runs/embedding_triplet_v1/best.pt",
+        "masked":   PROJECT_ROOT / "identification/runs/embedding_triplet_masked_v1/best.pt",
+        "metadata": PROJECT_ROOT / "identification/runs/embedding_metadata_v1/best.pt",
+        "fdi_init": PROJECT_ROOT / "identification/runs/embedding_fdi_init_v1/best.pt",
+    })
+    # Ensemble registries are built from YOLO-extracted crops so the query
+    # distribution matches what the demo feeds in at inference. See Phase 7.1
+    # "Deployment caveat" in thesis_notes.md for the full story.
+    ensemble_registry_dir: Path = PROJECT_ROOT / "identification/registry_ensemble_yolo"
     temp_dir: Path = PROJECT_ROOT / "backend/temp"
     yolo_conf: float = 0.25
     yolo_iou: float = 0.45
@@ -85,6 +97,12 @@ class PipelineModels:
     embedder_fdi_label_map: dict[str, int] = field(default_factory=dict)
     registry_index: RetrievalIndex | None = None
     registry_meta: dict[str, dict] = field(default_factory=dict)
+    # Ensemble: parallel arrays of
+    # (name, model, uses_metadata, fdi_label_map, crop_mode)
+    ensemble_models: list[tuple[str, torch.nn.Module, bool, dict[str, int], str]] = field(
+        default_factory=list
+    )
+    ensemble_indexes: list[RetrievalIndex] = field(default_factory=list)
     device: str = "cpu"
 
     def load_all(self) -> None:
@@ -133,6 +151,34 @@ class PipelineModels:
             payload = json.load(f)
         self.registry_meta = {p["person_id"]: p for p in payload["persons"]}
         print(f"[pipeline] registry size: {len(self.registry_index)} persons")
+
+        # 5. Ensemble — load every other embedder + its registry so the user
+        # can flip between single-model and ensemble per query. If the YOLO-
+        # aligned registries aren't built yet, we skip the ensemble (single
+        # mode still works), so the demo degrades gracefully.
+        first_registry_path = next(iter(self.config.ensemble_checkpoints.values()))
+        first_subdir = self.config.ensemble_registry_dir / first_registry_path.parent.name
+        if not (first_subdir / "index.faiss").exists():
+            print(f"[pipeline] ensemble registries not found at {self.config.ensemble_registry_dir}; "
+                  "ensemble mode disabled (single mode still works)")
+            return
+
+        for name, ckpt_path in self.config.ensemble_checkpoints.items():
+            print(f"[pipeline] loading ensemble member '{name}' from {ckpt_path}")
+            model, mcfg, _, ckpt = load_embedder_checkpoint(str(ckpt_path), self.device)
+            uses_meta = isinstance(model, ToothEmbeddingModelWithMetadata)
+            fdi_map = ckpt["fdi_label_map"] if uses_meta else {}
+            crop_mode = mcfg.get("data", {}).get("crop_mode", "raw")
+            self.ensemble_models.append((name, model, uses_meta, fdi_map, crop_mode))
+
+            # Map checkpoint name → registry sub-dir built by build_registry.
+            registry_subdir = self.config.ensemble_registry_dir / ckpt_path.parent.name
+            index = RetrievalIndex.load(
+                str(registry_subdir / "index"),
+                dim=model.projection_head.out_features,
+            )
+            self.ensemble_indexes.append(index)
+        print(f"[pipeline] ensemble members: {[m[0] for m in self.ensemble_models]}")
 
 
 def _resize_with_padding(crop: Image.Image, size: int) -> Image.Image:
@@ -211,6 +257,7 @@ async def run_pipeline(
     query_id: str,
     models: PipelineModels,
     mode: str = "segmentation",
+    ensemble: bool = False,
 ) -> AsyncGenerator[dict, None]:
     """Stream pipeline events as the query is processed.
 
@@ -222,6 +269,9 @@ async def run_pipeline(
       * "segmentation" — runs the seg model; crops use the tight bbox of each
         predicted mask (which more closely matches the GT-mask-based crops used
         during embedder training).
+
+    `ensemble` switches between a single embedder (default, FDI-init) and a
+    score-level ensemble of all four trained embedders (Phase 7.1).
     """
     cfg = models.config
     device = models.device
@@ -313,11 +363,38 @@ async def run_pipeline(
 
     # --- Stage B: Crops ---
     pano = Image.open(panoramic_path).convert("RGB")
+    pano_arr = np.asarray(pano)  # (H, W, 3) uint8 — used for masked variants
     crops: list[Image.Image] = []
-    for x1, y1, x2, y2 in bboxes:
+    masked_crops: list[Image.Image | None] = []
+    for i, (x1, y1, x2, y2) in enumerate(bboxes):
         ex1, ey1, ex2, ey2 = _expand_bbox((float(x1), float(y1), float(x2), float(y2)),
                                             pano.size, padding_ratio=0.1)
         crops.append(pano.crop((ex1, ey1, ex2, ey2)))
+
+        # Build masked variant when we have polygons (segmentation mode +
+        # ensemble use it). In detection mode polygons is empty and the masked
+        # crop falls back to the raw crop — fine because the masked ensemble
+        # member then sees a degraded but reasonable input.
+        if ensemble and polygons and i < len(polygons):
+            mask_full = np.zeros(pano_arr.shape[:2], dtype=np.uint8)
+            poly_int = polygons[i].astype(np.int32)
+            try:
+                import cv2
+                cv2.fillPoly(mask_full, [poly_int], color=1)
+            except Exception:
+                # Fall back to PIL polygon fill if cv2 isn't available
+                from PIL import ImageDraw as _ID
+                mask_im = Image.new("L", pano.size, 0)
+                _ID.Draw(mask_im).polygon(
+                    [(float(p[0]), float(p[1])) for p in polygons[i]], fill=1,
+                )
+                mask_full = np.asarray(mask_im)
+            region = pano_arr[ey1:ey2, ex1:ex2].copy()
+            region_mask = mask_full[ey1:ey2, ex1:ex2]
+            region[region_mask == 0] = 0
+            masked_crops.append(Image.fromarray(region))
+        else:
+            masked_crops.append(None)
 
     # --- Stage C: FDI classification ---
     t0 = time.perf_counter()
@@ -355,6 +432,7 @@ async def run_pipeline(
     fdi_kept = [fdi_labels[i] for i in keep_indices]
     fdi_conf_kept = [float(fdi_confidences[i]) for i in keep_indices]
     crops_kept = [crops[i] for i in keep_indices]
+    masked_crops_kept = [masked_crops[i] for i in keep_indices]
     polygons_kept = (
         [polygons[i] for i in keep_indices] if polygons else None
     )
@@ -398,33 +476,90 @@ async def run_pipeline(
         }
 
     # --- Stage D: Embeddings ---
+    # In single mode we run one embedder per crop. In ensemble mode we run
+    # every loaded embedder per crop and keep the per-model embedding arrays
+    # separate; aggregation + search happen per-model and are combined at the
+    # similarity-matrix level (Phase 7.1 score-level ensemble).
     t0 = time.perf_counter()
     yield {
         "event": "stage_start",
-        "data": {"stage": "embed", "message": "Generating embeddings...", "total": len(crops_kept)},
+        "data": {
+            "stage": "embed",
+            "message": (
+                "Generating ensemble embeddings..."
+                if ensemble
+                else "Generating embeddings..."
+            ),
+            "total": len(crops_kept),
+        },
     }
     await asyncio.sleep(0)
 
-    embeddings = []
-    with torch.no_grad():
-        for i, (crop, fdi) in enumerate(zip(crops_kept, fdi_kept)):
-            tensor = _to_tensor(crop, cfg.crop_size, device)
-            if models.embedder_uses_metadata:
-                fdi_idx = models.embedder_fdi_label_map.get(fdi)
-                if fdi_idx is None:
-                    fdi_idx = 0  # fallback if FDI is unseen by metadata model
-                fdi_idx_tensor = torch.tensor([fdi_idx], dtype=torch.long, device=device)
-                emb = models.embedder(tensor, fdi_idx_tensor)
-            else:
-                emb = models.embedder(tensor)
-            embeddings.append(emb.cpu().numpy()[0])
-            if (i + 1) % 4 == 0 or i == len(crops_kept) - 1:
-                yield {
-                    "event": "progress",
-                    "data": {"stage": "embed", "current": i + 1, "total": len(crops_kept)},
-                }
-                await asyncio.sleep(0)
-    embeddings_arr = np.stack(embeddings)
+    if ensemble:
+        # Per-model embedding lists, parallel to crops_kept.
+        per_model_embeddings: list[list[np.ndarray]] = [
+            [] for _ in models.ensemble_models
+        ]
+        # Pre-compute raw and masked tensors once per tooth.
+        with torch.no_grad():
+            for i, (crop, fdi, masked_crop) in enumerate(
+                zip(crops_kept, fdi_kept, masked_crops_kept)
+            ):
+                raw_tensor = _to_tensor(crop, cfg.crop_size, device)
+                masked_tensor = (
+                    _to_tensor(masked_crop, cfg.crop_size, device)
+                    if masked_crop is not None
+                    else raw_tensor  # detection mode: no polygons → use raw
+                )
+                for j, (name, model, uses_meta, fdi_map, crop_mode) in enumerate(
+                    models.ensemble_models
+                ):
+                    tensor = masked_tensor if crop_mode == "masked" else raw_tensor
+                    if uses_meta:
+                        fdi_idx = fdi_map.get(fdi, 0)
+                        fdi_t = torch.tensor([fdi_idx], dtype=torch.long, device=device)
+                        emb = model(tensor, fdi_t)
+                    else:
+                        emb = model(tensor)
+                    per_model_embeddings[j].append(emb.cpu().numpy()[0])
+                if (i + 1) % 4 == 0 or i == len(crops_kept) - 1:
+                    yield {
+                        "event": "progress",
+                        "data": {"stage": "embed", "current": i + 1, "total": len(crops_kept)},
+                    }
+                    await asyncio.sleep(0)
+        ensemble_emb_arrays = [np.stack(lst) for lst in per_model_embeddings]
+        # Use the FDI-init array (first non-baseline non-masked-non-metadata) as
+        # the canonical per-tooth array for downstream things that expect one.
+        # Find the fdi_init index if present; fall back to last.
+        canonical_idx = next(
+            (j for j, m in enumerate(models.ensemble_models) if m[0] == "fdi_init"),
+            len(ensemble_emb_arrays) - 1,
+        )
+        embeddings_arr = ensemble_emb_arrays[canonical_idx]
+    else:
+        embeddings = []
+        with torch.no_grad():
+            for i, (crop, fdi) in enumerate(zip(crops_kept, fdi_kept)):
+                tensor = _to_tensor(crop, cfg.crop_size, device)
+                if models.embedder_uses_metadata:
+                    fdi_idx = models.embedder_fdi_label_map.get(fdi)
+                    if fdi_idx is None:
+                        fdi_idx = 0  # fallback if FDI is unseen by metadata model
+                    fdi_idx_tensor = torch.tensor([fdi_idx], dtype=torch.long, device=device)
+                    emb = models.embedder(tensor, fdi_idx_tensor)
+                else:
+                    emb = models.embedder(tensor)
+                embeddings.append(emb.cpu().numpy()[0])
+                if (i + 1) % 4 == 0 or i == len(crops_kept) - 1:
+                    yield {
+                        "event": "progress",
+                        "data": {"stage": "embed", "current": i + 1, "total": len(crops_kept)},
+                    }
+                    await asyncio.sleep(0)
+        embeddings_arr = np.stack(embeddings)
+        ensemble_emb_arrays = None  # type: ignore[assignment]
+
     timings["embed"] = (time.perf_counter() - t0) * 1000
 
     yield {
@@ -433,30 +568,65 @@ async def run_pipeline(
             "stage": "embed",
             "n_embeddings": int(len(embeddings_arr)),
             "elapsed_ms": round(timings["embed"], 1),
+            "ensemble": ensemble,
+            "ensemble_members": [m[0] for m in models.ensemble_models] if ensemble else None,
         },
     }
     await _dwell(timings["embed"], cfg.min_stage_dwell_ms)
 
     # --- Stage E: Aggregation (mean + L2) ---
-    pooled = embeddings_arr.mean(axis=0)
-    norm = np.linalg.norm(pooled)
-    if norm > 1e-12:
-        pooled = pooled / norm
-    query_vec = pooled.astype(np.float32)
+    def _pool(arr: np.ndarray) -> np.ndarray:
+        pooled = arr.mean(axis=0)
+        n = np.linalg.norm(pooled)
+        return (pooled / n if n > 1e-12 else pooled).astype(np.float32)
+
+    if ensemble:
+        per_model_query_vecs = [_pool(a) for a in ensemble_emb_arrays]  # type: ignore[arg-type]
+    query_vec = _pool(embeddings_arr)
 
     # --- Stage F: FAISS search ---
     t0 = time.perf_counter()
+    n_candidates = len(models.registry_index)
     yield {
         "event": "stage_start",
         "data": {
             "stage": "search",
-            "message": f"Searching {len(models.registry_index)} candidates...",
+            "message": (
+                f"Searching {n_candidates} candidates with {len(models.ensemble_models)} models..."
+                if ensemble
+                else f"Searching {n_candidates} candidates..."
+            ),
         },
     }
     # Give the user a brief moment to read the search status before results pop.
     await asyncio.sleep(0.4)
 
-    sims, neighbor_ids = models.registry_index.search(query_vec, k=cfg.top_k)
+    if ensemble:
+        # Mean of per-model similarity vectors over the full registry, then top-k.
+        # Each per-model index is searched with k=n_candidates so we can average.
+        sim_stack = []
+        for j, index in enumerate(models.ensemble_indexes):
+            sims_full, ids_full = index.search(per_model_query_vecs[j], k=n_candidates)
+            # The ID order is the same across all 4 indexes (we verified during
+            # build), so we can stack scores directly by reordering by person_id.
+            # Build a position lookup from this model's index order.
+            order = {pid: i for i, pid in enumerate(ids_full)}
+            # Reorder to a canonical sequence (the first index's order)
+            if j == 0:
+                canonical_order = list(ids_full)
+                sim_stack.append(sims_full)
+            else:
+                reordered = np.array(
+                    [sims_full[order[pid]] for pid in canonical_order],
+                    dtype=np.float64,
+                )
+                sim_stack.append(reordered)
+        avg_sims = np.mean(np.stack(sim_stack, axis=0), axis=0)
+        top_idx = np.argsort(-avg_sims)[: cfg.top_k]
+        sims = avg_sims[top_idx]
+        neighbor_ids = [canonical_order[i] for i in top_idx]
+    else:
+        sims, neighbor_ids = models.registry_index.search(query_vec, k=cfg.top_k)
     timings["search"] = (time.perf_counter() - t0) * 1000
 
     # --- Stage G: Assemble result ---
@@ -475,13 +645,21 @@ async def run_pipeline(
     confidence = _confidence_label(float(sims[0]), float(sims[1]) if len(sims) > 1 else 0.0)
 
     # Per-tooth contribution: dot each tooth's embedding against the top-1
-    # gallery profile. Reveals which teeth carried the match.
+    # gallery profile. In ensemble mode we average the per-model contributions.
     tooth_contributions: list[dict] = []
     try:
         top1_person = results_list[0]["person_id"]
-        top1_faiss_idx = models.registry_index.person_ids.index(top1_person)
-        top1_vec = models.registry_index.index.reconstruct(top1_faiss_idx)
-        per_tooth_sims = embeddings_arr @ top1_vec  # (n_teeth,)
+        if ensemble:
+            per_tooth_sims_acc = np.zeros(len(embeddings_arr), dtype=np.float64)
+            for j, index in enumerate(models.ensemble_indexes):
+                top1_idx = index.person_ids.index(top1_person)
+                top1_vec = index.index.reconstruct(top1_idx)
+                per_tooth_sims_acc += ensemble_emb_arrays[j] @ top1_vec  # type: ignore[index]
+            per_tooth_sims = per_tooth_sims_acc / len(models.ensemble_indexes)
+        else:
+            top1_faiss_idx = models.registry_index.person_ids.index(top1_person)
+            top1_vec = models.registry_index.index.reconstruct(top1_faiss_idx)
+            per_tooth_sims = embeddings_arr @ top1_vec  # (n_teeth,)
         for i, fdi in enumerate(fdi_kept):
             tooth_contributions.append({
                 "fdi": fdi,
@@ -505,6 +683,8 @@ async def run_pipeline(
             "n_query_teeth": int(len(embeddings_arr)),
             "n_dropped": len(dropped),
             "tooth_contributions": tooth_contributions,
+            "ensemble": ensemble,
+            "ensemble_members": [m[0] for m in models.ensemble_models] if ensemble else None,
         },
     }
 
