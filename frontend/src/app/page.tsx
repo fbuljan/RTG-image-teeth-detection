@@ -9,7 +9,7 @@ import { RegistryList, type RegistryListHandle } from "@/components/RegistryList
 import { ResultsCards, type ResultsState } from "@/components/ResultsCards";
 import { useToasts } from "@/components/Toaster";
 import { UploadZone } from "@/components/UploadZone";
-import type { RegistryPerson, StageEvent } from "@/lib/api";
+import { type RegistryPerson, type StageEvent } from "@/lib/api";
 import { streamIdentify, type PipelineMode } from "@/lib/identify";
 
 const DEFAULT_MODE: PipelineMode = "segmentation";

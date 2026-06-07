@@ -15,7 +15,12 @@ type Props = {
 const MODE_HINT =
   "Detection runs a YOLO bounding-box detector (~99% box mAP50). Segmentation runs a YOLO instance segmenter (~95% mask mAP50) and uses the tight bbox of each predicted mask as the crop — closer to the GT-mask crops the embedder was trained on.";
 
-export function UploadZone({ onIdentify, busy, mode, onModeChange }: Props) {
+export function UploadZone({
+  onIdentify,
+  busy,
+  mode,
+  onModeChange,
+}: Props) {
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [hovering, setHovering] = useState(false);
@@ -50,37 +55,40 @@ export function UploadZone({ onIdentify, busy, mode, onModeChange }: Props) {
             Drag the X-ray you just downloaded here, then click <em>Identify</em>.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-            Cropping
-          </span>
-          <InfoHint text={MODE_HINT} />
-          <div
-            role="radiogroup"
-            aria-label="Cropping backend"
-            className="inline-flex rounded-full border border-slate-200 bg-slate-100 p-0.5 text-xs dark:border-slate-700 dark:bg-slate-800"
-          >
-            {(["segmentation", "detection"] as PipelineMode[]).map((m) => {
-              const active = mode === m;
-              return (
-                <button
-                  key={m}
-                  type="button"
-                  role="radio"
-                  aria-checked={active}
-                  disabled={busy}
-                  onClick={() => onModeChange(m)}
-                  className={`rounded-full px-3 py-1 font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${
-                    active
-                      ? "bg-white text-slate-900 shadow dark:bg-slate-950 dark:text-slate-100"
-                      : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100"
-                  }`}
-                >
-                  {m === "segmentation" ? "Segmentation" : "Detection"}
-                </button>
-              );
-            })}
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Cropping
+            </span>
+            <InfoHint text={MODE_HINT} />
+            <div
+              role="radiogroup"
+              aria-label="Cropping backend"
+              className="inline-flex rounded-full border border-slate-200 bg-slate-100 p-0.5 text-xs dark:border-slate-700 dark:bg-slate-800"
+            >
+              {(["segmentation", "detection"] as PipelineMode[]).map((m) => {
+                const active = mode === m;
+                return (
+                  <button
+                    key={m}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    disabled={busy}
+                    onClick={() => onModeChange(m)}
+                    className={`rounded-full px-3 py-1 font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                      active
+                        ? "bg-white text-slate-900 shadow dark:bg-slate-950 dark:text-slate-100"
+                        : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100"
+                    }`}
+                  >
+                    {m === "segmentation" ? "Segmentation" : "Detection"}
+                  </button>
+                );
+              })}
+            </div>
           </div>
+
         </div>
       </header>
 

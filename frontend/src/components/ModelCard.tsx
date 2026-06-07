@@ -91,11 +91,20 @@ type TrainingFacts = {
   init_from_classifier?: string | null;
 };
 
+type EnsembleSummary = {
+  members?: string[];
+  weights?: Record<string, number>;
+  multi_tooth_sweep?: SweepEntry[];
+  forensic_1tooth?: SweepEntry[];
+  peak_per_method?: Record<string, SweepEntry>;
+};
+
 type ModelCardPayload = {
   checkpoint: string;
   run_name: string;
   registry_size: number;
   default_mode?: "segmentation" | "detection";
+  ensemble_available?: boolean;
   eval_test?: { verification: VerificationMetrics; retrieval: RetrievalMetrics };
   multi_tooth_sweep?: SweepEntry[];
   forensic_1tooth?: SweepEntry[];
@@ -103,6 +112,8 @@ type ModelCardPayload = {
   subgroups?: SubgroupRow[];
   training?: TrainingFacts;
   yolo?: YoloSummary;
+  ensemble?: EnsembleSummary;
+  ensemble_yolo?: EnsembleSummary;
 };
 
 const PRETTY_SUBGROUP: Record<string, string> = {
@@ -201,6 +212,13 @@ function ModelCardBody({ data }: { data: ModelCardPayload }) {
       {data.eval_test && <SingleToothBlock metrics={data.eval_test} />}
       {data.multi_tooth_sweep && data.multi_tooth_sweep.length > 0 && (
         <MultiToothBlock sweep={data.multi_tooth_sweep} />
+      )}
+      {data.ensemble && data.ensemble.multi_tooth_sweep && data.ensemble.multi_tooth_sweep.length > 0 && (
+        <EnsembleBlock
+          ensemble={data.ensemble}
+          ensembleYolo={data.ensemble_yolo}
+          singleSweep={data.multi_tooth_sweep}
+        />
       )}
       {data.per_category && data.per_category.length > 0 && (
         <CategoryBlock rows={data.per_category} />
@@ -442,6 +460,145 @@ function MultiToothBlock({ sweep }: { sweep: SweepEntry[] }) {
         Peak is highlighted. Beyond n_query=16 the eligible gallery shrinks (only
         people with many teeth remain), so larger values aren&apos;t directly
         comparable.
+      </p>
+    </div>
+  );
+}
+
+function EnsembleSweepTable({
+  sweep,
+  singleByN,
+  emptyLabel = "—",
+}: {
+  sweep: SweepEntry[];
+  singleByN: Record<number, number>;
+  emptyLabel?: string;
+}) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+          <tr>
+            <th className="py-1 text-left">n_query</th>
+            <th className="py-1 text-right">Ensemble R-1</th>
+            <th className="py-1 text-right">Single R-1</th>
+            <th className="py-1 text-right">Δ</th>
+            <th className="py-1 text-right">R-5</th>
+            <th className="py-1 text-right">R-10</th>
+            <th className="py-1 text-right">mAP</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sweep.map((row) => {
+            const singleR1 = singleByN[row.n_query];
+            const delta = singleR1 !== undefined ? row.rank1_mean - singleR1 : null;
+            return (
+              <tr
+                key={row.n_query}
+                className="border-t border-slate-100 dark:border-slate-800"
+              >
+                <td className="py-1 font-mono">{row.n_query}</td>
+                <td className="py-1 text-right font-mono tabular-nums">
+                  {fmtPct(row.rank1_mean, 1)}
+                </td>
+                <td className="py-1 text-right font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                  {singleR1 !== undefined ? fmtPct(singleR1, 1) : emptyLabel}
+                </td>
+                <td
+                  className={`py-1 text-right font-mono tabular-nums ${
+                    delta !== null && delta > 0 ? "text-emerald-600 dark:text-emerald-400" : ""
+                  }`}
+                >
+                  {delta !== null
+                    ? `${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(1)}pp`
+                    : emptyLabel}
+                </td>
+                <td className="py-1 text-right font-mono tabular-nums">
+                  {fmtPct(row.rank5_mean, 1)}
+                </td>
+                <td className="py-1 text-right font-mono tabular-nums">
+                  {fmtPct(row.rank10_mean, 1)}
+                </td>
+                <td className="py-1 text-right font-mono tabular-nums">
+                  {fmtPct(row.mAP_mean, 1)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function EnsembleBlock({
+  ensemble,
+  ensembleYolo,
+  singleSweep,
+}: {
+  ensemble: EnsembleSummary;
+  ensembleYolo?: EnsembleSummary;
+  singleSweep?: SweepEntry[];
+}) {
+  const sweep = (ensemble.multi_tooth_sweep ?? []).slice().sort((a, b) => a.n_query - b.n_query);
+  const yoloSweep = (ensembleYolo?.multi_tooth_sweep ?? [])
+    .slice()
+    .sort((a, b) => a.n_query - b.n_query);
+  const singleByN: Record<number, number> = {};
+  for (const s of singleSweep ?? []) singleByN[s.n_query] = s.rank1_mean;
+
+  return (
+    <div>
+      <SectionTitle
+        title="Score-level ensemble (offline experiment)"
+        hint="Score-level mean of cosine similarities from all four embedders (baseline / masked / metadata / FDI-init). Same evaluation protocol as the single-model multi-tooth sweep above; the delta column compares against the single-model FDI-init headline. Not used in the live demo — see note below."
+      />
+      <p className="mb-3 text-xs text-slate-500 dark:text-slate-400">
+        Members: {(ensemble.members ?? []).join(", ")}.
+      </p>
+
+      <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-300">
+        Ground-truth-crop eval (controlled conditions)
+      </h4>
+      <EnsembleSweepTable sweep={sweep} singleByN={singleByN} />
+      <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+        Both registry and queries use human-drawn red-mask crops — the
+        regime the four embedders were trained on. The ensemble decorrelates
+        their failure modes and adds ~+20pp Rank-1 at n_query=16 over single-model FDI-init.
+      </p>
+
+      {yoloSweep.length > 0 && (
+        <>
+          <h4 className="mt-4 mb-1 text-xs font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-300">
+            YOLO-crop eval (inference-aligned)
+          </h4>
+          <EnsembleSweepTable sweep={yoloSweep} singleByN={singleByN} />
+          <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+            Both registry and queries are rebuilt with the YOLO segmenter to
+            match deployment. Gains shrink because the masked and metadata
+            members are sensitive to the small differences between YOLO
+            crops and the GT crops they were trained on. Still beats the
+            single-model GT result of{" "}
+            <span className="font-mono">
+              {fmtPct(singleByN[16] ?? 0, 1)}
+            </span>{" "}
+            at n_query=16.
+          </p>
+        </>
+      )}
+
+      <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+        <strong>Why this isn&apos;t in the live demo.</strong> Putting the
+        ensemble behind a toggle would expose its biggest weakness: the masked
+        member needs a polygon, so it breaks under the detection cropping path
+        and degrades the overall result. Forcing both members to share the
+        YOLO crop pipeline also requires a registry rebuilt with YOLO crops,
+        which trivially matches enrolled images to themselves at similarity 1.0
+        and obscures what the model is really doing. The single-model path is
+        robust across both cropping modes and exhibits the expected sub-1.0
+        similarities that make the demo legible. The ensemble is kept as an
+        offline result: a clean +20pp under controlled crop conditions, with a
+        documented distribution-shift caveat when crop pipelines drift.
       </p>
     </div>
   );
