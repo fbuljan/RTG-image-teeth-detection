@@ -186,12 +186,15 @@ tasks.md
 
 # Identification pipeline data (generated)
 identification/data/crops_gt/
+identification/data/crops_gt_rotnorm/
 identification/data/crops_yolo/
 identification/data/review_grid.png
+identification/data/review_grid_rotnorm.png
 identification/data/plots/
 identification/runs/
 identification/docs/
 identification/registry/
+identification/registry_rotnorm/
 identification/registry_ensemble/
 identification/registry_ensemble_yolo/
 
