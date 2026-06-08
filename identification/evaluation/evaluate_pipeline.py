@@ -1061,9 +1061,9 @@ def _sanity_check_registry_overlap(
 # Driver
 # ---------------------------------------------------------------------------
 
-def _build_test_panoramic_list(manifest_path: Path) -> list[tuple[str, str, Path]]:
+def _build_test_panoramic_list(manifest_path: Path, split: str = "test") -> list[tuple[str, str, Path]]:
     df = pd.read_csv(manifest_path, dtype=str)
-    test = df[df["split"] == "test"].drop_duplicates("person_id")
+    test = df[df["split"] == split].drop_duplicates("person_id")
     out: list[tuple[str, str, Path]] = []
     for _, row in test.iterrows():
         image_id = row["image_id"]
@@ -1151,12 +1151,36 @@ def main() -> None:
     parser.add_argument("--skip-heldout", action="store_true")
     parser.add_argument("--limit", type=int, default=None,
                         help="Optional: cap test persons for a smoke test.")
+    parser.add_argument("--embedder", default=None,
+                        help="Optional: override the deployed embedder checkpoint "
+                             "(e.g. for Phase 8.x experiments).")
+    parser.add_argument("--registry-dir", default=None,
+                        help="Optional: override the deployed registry directory "
+                             "(must match the embedder).")
+    parser.add_argument("--split", default="test",
+                        help="Which manifest split to evaluate (test by default). "
+                             "Phase 8.5+ uses 'val' to fit aggregation weights "
+                             "without touching the test set.")
     args = parser.parse_args()
 
     output_dir = (PROJECT_ROOT / args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     config = PipelineConfig()
+
+    # Phase 8.x embedder/registry swap: normalise relative paths to absolute so
+    # later `Path.relative_to(PROJECT_ROOT)` calls work for either form.
+    if args.embedder is not None:
+        emb_path = Path(args.embedder)
+        if not emb_path.is_absolute():
+            emb_path = (PROJECT_ROOT / emb_path).resolve()
+        config.embedder = emb_path
+    if args.registry_dir is not None:
+        reg_path = Path(args.registry_dir)
+        if not reg_path.is_absolute():
+            reg_path = (PROJECT_ROOT / reg_path).resolve()
+        config.registry_dir = reg_path
+
     models = PipelineModels(config=config)
     print("Loading pipeline...")
     models.load_all()
@@ -1166,7 +1190,7 @@ def main() -> None:
     embedder_hash = _file_hash(config.embedder)
     print(f"YOLO seg hash: {yolo_hash}, FDI hash: {fdi_hash}, embedder hash: {embedder_hash}")
 
-    test_persons_all = _build_test_panoramic_list(PROJECT_ROOT / args.manifest)
+    test_persons_all = _build_test_panoramic_list(PROJECT_ROOT / args.manifest, split=args.split)
     if args.limit:
         test_persons_all = test_persons_all[: args.limit]
     print(f"Test panoramics available on disk: {len(test_persons_all)}")
