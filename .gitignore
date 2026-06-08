@@ -195,6 +195,9 @@ identification/runs/
 identification/docs/
 identification/registry/
 identification/registry_rotnorm/
+identification/registry_jitter/
+identification/registry_blended_gt/
+identification/registry_blended_yolo/
 identification/registry_ensemble/
 identification/registry_ensemble_yolo/
 
