@@ -115,6 +115,7 @@ class ToothDataset(Dataset):
         self.transform = transform
         self.return_metadata = return_metadata
         self.fdi_label_map = fdi_label_map
+        self._split = split
 
         # Load and filter manifest
         df = pd.read_csv(manifest_path, dtype=str)
@@ -124,6 +125,11 @@ class ToothDataset(Dataset):
 
         # Path column
         self.path_col = "crop_path" if crop_mode == "raw" else "masked_crop_path"
+
+        # Phase 8.3 — optional GT->YOLO crop blend. Configured by enable_yolo_blend().
+        self._blend_map: Optional[Dict[tuple, str]] = None
+        self._blend_prob: float = 0.0
+        self._blend_log: list = []  # captures first-epoch substitution trace for diagnostics
 
         # Label mapping
         if label_map is None:
@@ -137,9 +143,78 @@ class ToothDataset(Dataset):
     def __len__(self) -> int:
         return len(self.df)
 
+    def enable_yolo_blend(self, pair_table_path: str, prob: float,
+                          log_trace: bool = True) -> int:
+        """
+        Phase 8.3 — at train time, substitute the GT crop with a verified-aligned
+        YOLO crop with probability `prob`. Only accept=True rows in the pair table
+        are eligible (IoU>=0.5 AND fdi_confidence>=0.5).
+
+        Hard guard: only enable on training split.
+
+        Returns: number of (image_id, fdi) pairs available in the blend map.
+        """
+        if self._split != "train":
+            raise RuntimeError(
+                f"enable_yolo_blend called on split={self._split!r}; "
+                "blending must never touch val/test."
+            )
+        if not (0.0 <= prob <= 1.0):
+            raise ValueError(f"blend prob must be in [0,1], got {prob}")
+
+        pt = pd.read_csv(pair_table_path)
+        eligible = pt[pt["accept"].astype(str).str.lower().isin(["true", "1"])]
+        # Sanity: all eligible image_ids must be train-split panoramics in self.df
+        train_ids = set(self.df["image_id"].unique())
+        leaked = set(eligible["image_id"].unique()) - train_ids
+        if leaked:
+            raise RuntimeError(
+                f"pair table contains {len(leaked)} image_ids not in this dataset's "
+                f"train split; would leak val/test data. Examples: "
+                f"{sorted(leaked)[:3]}"
+            )
+        self._blend_map = {
+            (str(row.image_id), str(row.tooth_fdi)): str(row.yolo_crop_path)
+            for row in eligible.itertuples(index=False)
+        }
+        self._blend_prob = float(prob)
+        if log_trace:
+            self._blend_log = []
+        return len(self._blend_map)
+
+    def get_blend_trace_summary(self) -> dict:
+        """Return the per-epoch substitution stats captured since enable_yolo_blend."""
+        if not self._blend_log:
+            return {"calls": 0, "substituted": 0, "rate": 0.0}
+        n_subs = sum(1 for entry in self._blend_log if entry["substituted"])
+        return {
+            "calls": len(self._blend_log),
+            "substituted": n_subs,
+            "rate": n_subs / len(self._blend_log) if self._blend_log else 0.0,
+            "first10": self._blend_log[:10],
+        }
+
+    def reset_blend_trace(self) -> None:
+        self._blend_log = []
+
     def __getitem__(self, idx: int):
         row = self.df.iloc[idx]
-        img_path = self.root_dir / row[self.path_col]
+        path = row[self.path_col]
+
+        # Phase 8.3 GT->YOLO blend (training only, gated by enable_yolo_blend)
+        if self._blend_map is not None and self._blend_prob > 0.0:
+            key = (str(row["image_id"]), str(row["tooth_fdi"]))
+            substituted = False
+            if key in self._blend_map and random.random() < self._blend_prob:
+                path = self._blend_map[key]
+                substituted = True
+            if len(self._blend_log) < 5000:  # keep trace bounded
+                self._blend_log.append({
+                    "image_id": key[0], "tooth_fdi": key[1],
+                    "substituted": substituted,
+                })
+
+        img_path = self.root_dir / path
 
         try:
             img = Image.open(img_path).convert("RGB")
