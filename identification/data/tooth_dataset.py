@@ -37,14 +37,27 @@ class GaussianNoise:
 
 
 def get_train_transforms(aug_cfg: Optional[dict] = None) -> transforms.Compose:
-    """Build training transforms with medical-image-safe augmentations."""
+    """Build training transforms with medical-image-safe augmentations.
+
+    The optional ``scale`` key enables bbox-jitter (Phase 8.2): RandomAffine
+    samples a per-image isotropic scale in the given (min, max) range, which
+    simulates the YOLO-vs-GT crop-framing distribution shift that Phase 7.1
+    surfaced (median 4.8 deg polygon disagreement, ~30% of crops differ
+    measurably in framing).
+    """
     cfg = aug_cfg or {}
+    translate = cfg.get("translate", 0.05)
+    scale_cfg = cfg.get("scale")  # None disables; (lo, hi) tuple enables jitter
+    affine_kwargs = dict(
+        degrees=cfg.get("rotation_degrees", 10),
+        translate=(translate, translate),
+        fill=0,
+    )
+    if scale_cfg is not None:
+        affine_kwargs["scale"] = tuple(scale_cfg)
     return transforms.Compose([
         transforms.Resize((224, 224)),
-        transforms.RandomAffine(
-            degrees=cfg.get("rotation_degrees", 10),
-            translate=(cfg.get("translate", 0.05), cfg.get("translate", 0.05)),
-        ),
+        transforms.RandomAffine(**affine_kwargs),
         transforms.ColorJitter(
             brightness=cfg.get("brightness", 0.1),
             contrast=cfg.get("contrast", 0.1),
