@@ -935,6 +935,7 @@ def evaluate_heldout_enrolment(
 
     records: list[dict] = []
     in_r1_per_trial: list[float] = []
+    K_TOP = 5  # Phase 8.6 — top-5 retrieval feeds mean_top5_sim, gap_top1_vs_mean5.
     for trial in range(n_trials):
         held = set(rng.choice(test_pids, size=n_holdout, replace=False))
         sub_index = _rebuild_index_without(full_registry, held)
@@ -946,11 +947,27 @@ def evaluate_heldout_enrolment(
                 continue
             n_eff = min(n_query, len(arr))
             idx = rng.permutation(len(arr))[:n_eff]
-            q = _mean_pool(arr[idx])
-            sims, ids = sub_index.search(q, k=2)
+            sub_arr = arr[idx]
+            q = _mean_pool(sub_arr)
+            sims, ids = sub_index.search(q, k=K_TOP)
             label = "oos" if pid in held else "in_registry"
             sim_top1 = float(sims[0])
             gap = float(sims[0] - sims[1]) if len(sims) > 1 else 1.0
+            # Phase 8.6 open-set features
+            sims_arr = np.asarray(sims, dtype=np.float64)
+            mean_top5_sim = float(sims_arr.mean()) if len(sims_arr) else sim_top1
+            tail = sims_arr[1:] if len(sims_arr) > 1 else sims_arr
+            gap_top1_vs_mean5 = float(sim_top1 - tail.mean()) if len(tail) else 0.0
+            # vote_consistency: per-crop top-1 vote, fraction agreeing with the modal identity.
+            _crop_sims, crop_ids = sub_index.search(sub_arr, k=1)
+            per_crop_top1 = [row[0] for row in crop_ids]
+            if per_crop_top1:
+                from collections import Counter
+                modal_id, modal_count = Counter(per_crop_top1).most_common(1)[0]
+                vote_consistency = float(modal_count) / float(len(per_crop_top1))
+            else:
+                modal_id = ids[0]
+                vote_consistency = 0.0
             records.append({
                 "pid": pid,
                 "trial": trial,
@@ -958,6 +975,11 @@ def evaluate_heldout_enrolment(
                 "n_query": n_eff,
                 "sim_top1": sim_top1,
                 "gap_top12": gap,
+                "sim_top_k": [float(s) for s in sims_arr.tolist()],
+                "mean_top5_sim": mean_top5_sim,
+                "gap_top1_vs_mean5": gap_top1_vs_mean5,
+                "vote_consistency": vote_consistency,
+                "modal_per_crop_pid": modal_id,
                 "top1_pid": ids[0],
                 "registry_size": len(sub_index),
             })
@@ -1149,6 +1171,11 @@ def main() -> None:
     parser.add_argument("--skip-baseline", action="store_true")
     parser.add_argument("--skip-rotation", action="store_true")
     parser.add_argument("--skip-heldout", action="store_true")
+    parser.add_argument("--heldout-under-rotation", action="store_true",
+                        help="Phase 8.6: also run held-out enrolment with rotated queries "
+                             "vs the upright registry (writes heldout_enrol_rotated.json). "
+                             "Reuses rotation-slice embeddings when --skip-rotation is not set; "
+                             "otherwise performs its own rotated extraction.")
     parser.add_argument("--limit", type=int, default=None,
                         help="Optional: cap test persons for a smoke test.")
     parser.add_argument("--embedder", default=None,
@@ -1301,6 +1328,9 @@ def main() -> None:
         print(f"[baseline] saved → {output_dir/'yolo_eval.json'}")
 
     # --- Rotation-stress slice (paired to baseline by permutations) ---
+    # Capture rotated embeddings if produced, for optional reuse by --heldout-under-rotation.
+    per_person_rot_captured: dict[str, np.ndarray] | None = None
+    rotation_angle_by_pid: dict[str, float] = {}
     if not args.skip_rotation:
         print(f"\n[rotation_stress] drawing per-person angles in ±{args.rotation_deg:.0f}°...")
         rotated_persons: list[tuple[str, str, Path, float]] = []
@@ -1314,6 +1344,8 @@ def main() -> None:
         per_person, stage_outputs, n_failed = _extract_for_split(
             "rotation_stress", rotated_persons, cache, models, load_gt=True,
         )
+        per_person_rot_captured = per_person
+        rotation_angle_by_pid = angle_by_pid
 
         print("[rotation_stress] symmetric sweep (REUSING baseline permutations for pairing)...")
         sweep_sym_rot: list[dict] = []
@@ -1470,6 +1502,9 @@ def main() -> None:
         payloads["rotation_stress"] = rot_payload
         print(f"[rotation_stress] saved → {output_dir/'rotation_stress.json'}")
 
+    # Shared seed for upright + rotated heldout so trial holdout sets are paired.
+    heldout_seed_for_rotation = args.seed + 909
+
     # --- Held-out enrolment slice ---
     if not args.skip_heldout:
         print("\n[heldout_enrol] reusing upright cached embeddings...")
@@ -1480,7 +1515,8 @@ def main() -> None:
         heldout = evaluate_heldout_enrolment(
             per_person, models.registry_index,
             n_holdout=args.heldout_count, n_trials=args.heldout_trials,
-            rng=heldout_rng, bootstrap_rng=bootstrap_rng,
+            rng=np.random.default_rng(heldout_seed_for_rotation),
+            bootstrap_rng=bootstrap_rng,
             n_query=max(args.n_query_list),
         )
         with open(output_dir / "heldout_enrol.json", "w") as f:
@@ -1493,6 +1529,46 @@ def main() -> None:
             print(f"  IN   sim_top1 median: {heldout['in_sim_top1']['median']:.3f}  "
                   f"p10-p90: [{heldout['in_sim_top1']['p10']:.3f}, {heldout['in_sim_top1']['p90']:.3f}]")
         print(f"[heldout_enrol] saved → {output_dir/'heldout_enrol.json'}")
+
+    # --- Phase 8.6: heldout enrolment with rotated queries vs upright registry ---
+    if args.heldout_under_rotation and not args.skip_heldout:
+        print("\n[heldout_enrol_rotated] preparing rotated query embeddings...")
+        if per_person_rot_captured is not None and len(per_person_rot_captured) > 0:
+            per_person_rot_for_heldout = per_person_rot_captured
+            print(f"  reusing rotation-slice embeddings (n_persons={len(per_person_rot_for_heldout)}, "
+                  f"angles from upstream slice)")
+        else:
+            print(f"  --skip-rotation was set; drawing fresh per-person angles in ±{args.rotation_deg:.0f}°...")
+            local_angle_rng = np.random.default_rng(args.seed + 707)
+            rotated_persons_local: list[tuple[str, str, Path, float]] = []
+            local_angles: dict[str, float] = {}
+            for pid, image_id, pano_path in test_persons_all:
+                angle = float(local_angle_rng.uniform(-args.rotation_deg, args.rotation_deg))
+                rotated_persons_local.append((pid, image_id, pano_path, angle))
+                local_angles[pid] = angle
+            per_person_rot_for_heldout, _, _ = _extract_for_split(
+                "heldout_enrol_rotated", rotated_persons_local, cache, models, load_gt=False,
+            )
+            rotation_angle_by_pid = local_angles
+
+        # Same seed as upright heldout → same trial holdout sets → paired upright/rotated.
+        heldout_rot = evaluate_heldout_enrolment(
+            per_person_rot_for_heldout, models.registry_index,
+            n_holdout=args.heldout_count, n_trials=args.heldout_trials,
+            rng=np.random.default_rng(heldout_seed_for_rotation),
+            bootstrap_rng=bootstrap_rng,
+            n_query=max(args.n_query_list),
+        )
+        heldout_rot["rotation_deg_max"] = args.rotation_deg
+        heldout_rot["per_person_angle"] = rotation_angle_by_pid
+        with open(output_dir / "heldout_enrol_rotated.json", "w") as f:
+            json.dump(heldout_rot, f, indent=2)
+        if not heldout_rot.get("skipped"):
+            print(f"  rotated in_registry R1: {heldout_rot['in_registry_r1_mean']:.4f} "
+                  f"[{heldout_rot['in_registry_r1_ci95_low']:.3f}, {heldout_rot['in_registry_r1_ci95_high']:.3f}]")
+            print(f"  rotated OOS  sim_top1 median: {heldout_rot['oos_sim_top1']['median']:.3f}")
+            print(f"  rotated IN   sim_top1 median: {heldout_rot['in_sim_top1']['median']:.3f}")
+        print(f"[heldout_enrol_rotated] saved → {output_dir/'heldout_enrol_rotated.json'}")
 
     print("\nPhase 8.0 baseline complete.")
 
