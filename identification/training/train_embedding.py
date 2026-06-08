@@ -80,78 +80,169 @@ def build_loss_and_miner(cfg: dict, device: str):
     return loss_fn, miner_fn
 
 
-def train_one_epoch(model, loader, loss_fn, miner_fn, optimizer, scheduler, device, epoch):
+def _mine_safe(miner_fn, embeddings, labels):
+    """Run the PML miner; on MPS RuntimeError fall back to CPU INDICES only.
+
+    Critically returns the mined indices for use against the on-device embeddings,
+    so the triplet loss is computed on-device and gradients flow back through
+    the backbone. (The pre-Phase-8.4 code .detach().cpu()'d the embeddings and
+    computed loss on CPU, which silently broke gradient flow into the backbone
+    on the fallback path — see Phase 8.4 design review.)
+    """
+    try:
+        return miner_fn(embeddings, labels)
+    except RuntimeError:
+        return miner_fn(embeddings.detach().cpu(), labels.cpu())
+
+
+def _hard_pairs_nonempty(hard_pairs) -> bool:
+    """PML miners return a tuple of index tensors; first element empty == no triplets."""
+    if hard_pairs is None:
+        return False
+    if not hasattr(hard_pairs, "__len__") or len(hard_pairs) == 0:
+        return False
+    first = hard_pairs[0] if isinstance(hard_pairs, tuple) else hard_pairs
+    try:
+        return len(first) > 0
+    except TypeError:
+        return False
+
+
+def _hard_pairs_to_device(hard_pairs, device):
+    """Move mined indices (from possibly-CPU miner) to the embedding device."""
+    if isinstance(hard_pairs, tuple):
+        return tuple(t.to(device) if hasattr(t, "to") else t for t in hard_pairs)
+    return hard_pairs.to(device) if hasattr(hard_pairs, "to") else hard_pairs
+
+
+def train_one_epoch(model, loader, loss_fn, miner_fn, optimizer, scheduler, device, epoch,
+                    aux_lambda: float = 0.0):
+    """Training loop; supports Phase 8.4 multi-task FDI aux loss when the model has
+    fdi_head and the loader yields (images, person_labels, fdi_labels)."""
     model.train()
     total_loss = 0.0
+    total_triplet = 0.0
+    total_aux = 0.0
     num_batches = 0
     num_triplets = 0
+    aux_enabled = aux_lambda > 0 and getattr(model, "fdi_head", None) is not None
 
-    for i, (images, labels) in enumerate(loader):
+    for i, batch in enumerate(loader):
+        if aux_enabled:
+            images, labels, fdi_labels = batch
+            fdi_labels = fdi_labels.to(device)
+        else:
+            images, labels = batch
+            fdi_labels = None
+
         images = images.to(device)
         labels = labels.to(device)
 
-        embeddings = model(images)
+        model_out = model(images)
+        if aux_enabled:
+            embeddings, fdi_logits = model_out
+        else:
+            embeddings = model_out
+            fdi_logits = None
 
-        # Mine hard pairs and compute loss
-        # Fall back to CPU if MPS has issues with PML operations
-        try:
-            hard_pairs = miner_fn(embeddings, labels)
-            loss = loss_fn(embeddings, labels, hard_pairs)
-        except RuntimeError:
-            emb_cpu = embeddings.detach().cpu().requires_grad_(True)
-            lab_cpu = labels.cpu()
-            hard_pairs = miner_fn(emb_cpu, lab_cpu)
-            loss = loss_fn(emb_cpu, lab_cpu, hard_pairs)
+        # Miner (may fall back to CPU on MPS); resulting INDICES move back to device
+        # so triplet loss stays on-device and the backbone receives gradient.
+        hard_pairs = _mine_safe(miner_fn, embeddings, labels)
+        hard_pairs = _hard_pairs_to_device(hard_pairs, embeddings.device)
 
-        if loss.item() > 0:
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        # Per-term loss: triplet only when miner found pairs; aux always (when enabled)
+        triplet_val = 0.0
+        aux_val = 0.0
+        if _hard_pairs_nonempty(hard_pairs):
+            triplet = loss_fn(embeddings, labels, hard_pairs)
+            triplet_val = float(triplet.detach().item())
+        else:
+            triplet = None
+
+        if aux_enabled:
+            aux = F.cross_entropy(fdi_logits, fdi_labels)
+            aux_val = float(aux.detach().item())
+            if triplet is not None:
+                loss = triplet + aux_lambda * aux
+            else:
+                loss = aux_lambda * aux
+        else:
+            if triplet is None:
+                # No triplet, no aux: skip backward (preserves pre-8.4 behaviour)
+                if scheduler is not None:
+                    scheduler.step()
+                continue
+            loss = triplet
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
         if scheduler is not None:
             scheduler.step()
 
-        total_loss += loss.item()
+        total_loss += float(loss.detach().item())
+        total_triplet += triplet_val
+        total_aux += aux_val
         num_batches += 1
-        if hasattr(hard_pairs, '__len__') and len(hard_pairs) > 0:
+        if _hard_pairs_nonempty(hard_pairs):
             num_triplets += len(hard_pairs[0]) if isinstance(hard_pairs, tuple) else 0
 
-        # MPS memory management
         if device == "mps" and (i + 1) % 50 == 0:
             torch.mps.empty_cache()
 
-    return {
+    metrics = {
         "loss": total_loss / max(num_batches, 1),
         "num_triplets": num_triplets,
+        "triplet_loss": total_triplet / max(num_batches, 1),
+        "aux_loss": total_aux / max(num_batches, 1),
     }
+    if aux_enabled and metrics["triplet_loss"] > 1e-9:
+        metrics["lambda_aux"] = aux_lambda * metrics["aux_loss"]
+        metrics["aux_ratio"] = (aux_lambda * metrics["aux_loss"]) / metrics["triplet_loss"]
+    return metrics
 
 
 @torch.no_grad()
-def compute_val_metrics(model, val_loader, device):
-    """Embed all val samples and compute Rank-1 accuracy."""
+def compute_val_metrics(model, val_loader, device, aux_enabled: bool = False):
+    """Embed all val samples and compute Rank-1 accuracy. When aux_enabled, the
+    val_loader is expected to yield (img, person_label, fdi_label) and the model
+    forward returns (emb, fdi_logits); we additionally compute FDI top-1 acc."""
     model.eval()
     all_embeddings = []
     all_labels = []
+    fdi_correct = 0
+    fdi_total = 0
 
-    for images, labels in val_loader:
+    for batch in val_loader:
+        if aux_enabled:
+            images, labels, fdi_labels = batch
+            fdi_labels = fdi_labels.to(device)
+        else:
+            images, labels = batch
+            fdi_labels = None
+
         images = images.to(device)
-        emb = model(images)
+        out = model(images)
+        if aux_enabled:
+            emb, fdi_logits = out
+            fdi_pred = fdi_logits.argmax(dim=1)
+            fdi_correct += int((fdi_pred == fdi_labels).sum().item())
+            fdi_total += int(fdi_labels.numel())
+        else:
+            emb = out
         all_embeddings.append(emb.cpu())
         all_labels.append(labels)
 
     embeddings = torch.cat(all_embeddings, dim=0)  # (N, dim)
     labels = torch.cat(all_labels, dim=0)           # (N,)
 
-    # Cosine similarity (embeddings are L2-normalized → dot product = cosine)
     sim_matrix = embeddings @ embeddings.T
-    sim_matrix.fill_diagonal_(-float("inf"))  # exclude self
-
-    # Rank-1: is the nearest neighbor from the same person?
+    sim_matrix.fill_diagonal_(-float("inf"))
     nn_indices = sim_matrix.argmax(dim=1)
     nn_labels = labels[nn_indices]
     rank1 = (nn_labels == labels).float().mean().item()
 
-    # Rank-5
     _, topk_indices = sim_matrix.topk(5, dim=1)
     topk_labels = labels[topk_indices]
     rank5 = (topk_labels == labels.unsqueeze(1)).any(dim=1).float().mean().item()
@@ -159,7 +250,10 @@ def compute_val_metrics(model, val_loader, device):
     if device == "mps":
         torch.mps.empty_cache()
 
-    return {"rank1": rank1, "rank5": rank5}
+    metrics = {"rank1": rank1, "rank5": rank5}
+    if aux_enabled and fdi_total > 0:
+        metrics["fdi_acc"] = fdi_correct / fdi_total
+    return metrics
 
 
 def main():
@@ -189,6 +283,17 @@ def main():
     num_persons = len(label_map)
     print(f"Task: person identification, Persons: {num_persons}")
 
+    # Phase 8.4 — optional FDI multi-task aux loss. Build FDI->idx label map
+    # consistent with the deployed FDI classifier (52 classes, sorted numerically).
+    aux_cfg = cfg.get("aux_loss") or {}
+    aux_lambda = float(aux_cfg.get("lambda", 0.0)) if aux_cfg.get("type") == "fdi" else 0.0
+    fdi_label_map: dict | None = None
+    num_fdi_classes: int | None = None
+    if aux_lambda > 0.0:
+        fdi_label_map = ToothDataset.build_label_map(manifest_path, "tooth_fdi")
+        num_fdi_classes = len(fdi_label_map)
+        print(f"Aux loss: FDI classification (num_classes={num_fdi_classes}, lambda={aux_lambda})")
+
     # Build datasets
     train_dataset = ToothDataset(
         manifest_path=manifest_path,
@@ -197,6 +302,8 @@ def main():
         target_col=target_col,
         transform=get_train_transforms(cfg.get("augmentation")),
         label_map=label_map,
+        return_metadata=(fdi_label_map is not None),
+        fdi_label_map=fdi_label_map,
     )
     val_dataset = ToothDataset(
         manifest_path=manifest_path,
@@ -205,8 +312,20 @@ def main():
         target_col=target_col,
         transform=get_val_transforms(),
         label_map=label_map,
+        return_metadata=(fdi_label_map is not None),
+        fdi_label_map=fdi_label_map,
     )
     print(f"Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples")
+
+    # Phase 8.3 — optional GT->YOLO blend on the train dataset
+    blend_cfg = cfg.get("data", {}).get("yolo_blend")
+    if blend_cfg:
+        n_pairs = train_dataset.enable_yolo_blend(
+            pair_table_path=blend_cfg["pair_table"],
+            prob=blend_cfg["prob"],
+        )
+        print(f"YOLO blend: prob={blend_cfg['prob']}, eligible pairs={n_pairs} "
+              f"(pair_table={blend_cfg['pair_table']})")
 
     # PK sampler for training
     sampler_cfg = cfg["sampler"]
@@ -235,8 +354,10 @@ def main():
         embedding_dim=model_cfg.get("embedding_dim", 128),
         pretrained=model_cfg.get("pretrained", True),
         dropout=model_cfg.get("dropout", 0.2),
+        num_fdi_classes=num_fdi_classes,
     ).to(device)
-    print(f"Model: ResNet-18 → {model_cfg.get('embedding_dim', 128)}-dim embedding, "
+    head_str = f" + FDI head ({num_fdi_classes} cls)" if num_fdi_classes else ""
+    print(f"Model: ResNet-18 → {model_cfg.get('embedding_dim', 128)}-dim embedding{head_str}, "
           f"{sum(p.numel() for p in model.parameters()):,} params")
 
     # Optionally initialize backbone from Phase 2 classifier
@@ -295,7 +416,8 @@ def main():
 
     # Training log
     log_path = output_dir / "training_log.csv"
-    log_fields = ["epoch", "train_loss", "val_rank1", "val_rank5", "lr", "time_s"]
+    log_fields = ["epoch", "train_loss", "triplet_loss", "aux_loss", "aux_ratio",
+                  "val_rank1", "val_rank5", "val_fdi_acc", "lr", "time_s"]
     if not args.resume:
         with open(log_path, "w", newline="") as f:
             csv.DictWriter(f, fieldnames=log_fields).writeheader()
@@ -306,13 +428,25 @@ def main():
     patience = eval_cfg.get("patience", 10)
     patience_counter = 0
 
+    # Phase 8.4 kill-switches (only active when aux loss is on)
+    aux_enabled = aux_lambda > 0.0
+    killswitch_cfg = cfg.get("killswitch") or {}
+    ks_epoch = int(killswitch_cfg.get("epoch", 20))
+    ks_min_val_rank1 = float(killswitch_cfg.get("min_val_rank1", 0.0))
+    ks_min_fdi_acc = float(killswitch_cfg.get("min_fdi_acc", 0.0))
+    ks_max_aux_ratio = float(killswitch_cfg.get("max_aux_ratio", float("inf")))
+    if aux_enabled:
+        print(f"Kill-switch at epoch {ks_epoch}: val_rank1 >= {ks_min_val_rank1}, "
+              f"val_fdi_acc >= {ks_min_fdi_acc}, max aux_ratio <= {ks_max_aux_ratio}")
+
     print(f"\nTraining for {epochs} epochs (validate every {val_every}, patience={patience})...\n")
 
     for epoch in range(start_epoch, epochs):
         t0 = time.time()
 
         train_metrics = train_one_epoch(
-            model, train_loader, loss_fn, miner_fn, optimizer, scheduler, device, epoch
+            model, train_loader, loss_fn, miner_fn, optimizer, scheduler, device, epoch,
+            aux_lambda=aux_lambda,
         )
 
         elapsed = time.time() - t0
@@ -320,21 +454,32 @@ def main():
 
         # Validate periodically
         val_rank1, val_rank5 = 0.0, 0.0
+        val_fdi_acc = 0.0
         if (epoch + 1) % val_every == 0 or epoch == 0:
-            val_metrics = compute_val_metrics(model, val_loader, device)
+            val_metrics = compute_val_metrics(model, val_loader, device, aux_enabled=aux_enabled)
             val_rank1 = val_metrics["rank1"]
             val_rank5 = val_metrics["rank5"]
+            val_fdi_acc = val_metrics.get("fdi_acc", 0.0)
+
+            extras = []
+            if aux_enabled:
+                extras.append(f"val_fdi={val_fdi_acc:.4f}")
+                if "aux_ratio" in train_metrics:
+                    extras.append(f"aux/triplet={train_metrics['aux_ratio']:.2f}")
+            extras_str = (" | " + " ".join(extras)) if extras else ""
 
             print(
                 f"Epoch {epoch+1:3d}/{epochs} | "
                 f"loss={train_metrics['loss']:.4f} | "
-                f"val_rank1={val_rank1:.4f} val_rank5={val_rank5:.4f} | "
+                f"val_rank1={val_rank1:.4f} val_rank5={val_rank5:.4f}{extras_str} | "
                 f"lr={lr:.6f} | {elapsed:.1f}s"
             )
         else:
+            ratio_str = (f" aux/triplet={train_metrics['aux_ratio']:.2f}"
+                         if aux_enabled and "aux_ratio" in train_metrics else "")
             print(
                 f"Epoch {epoch+1:3d}/{epochs} | "
-                f"loss={train_metrics['loss']:.4f} | "
+                f"loss={train_metrics['loss']:.4f}{ratio_str} | "
                 f"lr={lr:.6f} | {elapsed:.1f}s"
             )
 
@@ -344,8 +489,13 @@ def main():
             writer.writerow({
                 "epoch": epoch + 1,
                 "train_loss": f"{train_metrics['loss']:.6f}",
+                "triplet_loss": f"{train_metrics.get('triplet_loss', 0.0):.6f}",
+                "aux_loss": f"{train_metrics.get('aux_loss', 0.0):.6f}",
+                "aux_ratio": (f"{train_metrics['aux_ratio']:.4f}"
+                              if "aux_ratio" in train_metrics else ""),
                 "val_rank1": f"{val_rank1:.6f}" if val_rank1 > 0 else "",
                 "val_rank5": f"{val_rank5:.6f}" if val_rank5 > 0 else "",
+                "val_fdi_acc": f"{val_fdi_acc:.6f}" if val_fdi_acc > 0 else "",
                 "lr": f"{lr:.8f}",
                 "time_s": f"{elapsed:.1f}",
             })
@@ -360,6 +510,8 @@ def main():
             "label_map": label_map,
             "config": cfg,
         }
+        if fdi_label_map is not None:
+            checkpoint_data["fdi_label_map"] = fdi_label_map
 
         if cfg["output"].get("save_last", True):
             torch.save(checkpoint_data, output_dir / "last.pt")
@@ -377,6 +529,19 @@ def main():
                 if patience_counter >= patience:
                     print(f"  Early stopping at epoch {epoch+1} (patience={patience})")
                     break
+
+        # Phase 8.4 kill-switch at the configured epoch
+        if aux_enabled and (epoch + 1) == ks_epoch and val_rank1 > 0:
+            reasons = []
+            if val_rank1 < ks_min_val_rank1:
+                reasons.append(f"val_rank1={val_rank1:.4f} < {ks_min_val_rank1}")
+            if val_fdi_acc < ks_min_fdi_acc:
+                reasons.append(f"val_fdi_acc={val_fdi_acc:.4f} < {ks_min_fdi_acc}")
+            if train_metrics.get("aux_ratio", 0.0) > ks_max_aux_ratio:
+                reasons.append(f"aux_ratio={train_metrics['aux_ratio']:.2f} > {ks_max_aux_ratio}")
+            if reasons:
+                print(f"  KILL-SWITCH triggered at epoch {epoch+1}: " + "; ".join(reasons))
+                break
 
     print(f"\nTraining complete. Best rank1={best_rank1:.4f}")
     print(f"Checkpoints: {output_dir}")

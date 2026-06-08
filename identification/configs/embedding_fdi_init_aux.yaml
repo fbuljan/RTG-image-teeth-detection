@@ -1,0 +1,76 @@
+# Phase 8.4 — FDI-init embedder with multi-task FDI classification auxiliary head.
+# Identical to configs/embedding_fdi_init.yaml (deployed embedder) except:
+# - aux_loss section enables an FDI classification head fed by the same
+#   post-dropout 512-d features that the projection head sees. lambda=0.1
+#   keeps the aux gradient as a gentle regulariser rather than a co-equal
+#   objective (design-review-recommended starting point).
+# - augmentations unchanged from deployed defaults (NO 8.2 scale jitter).
+# - killswitch section aborts training at epoch 20 if the experiment is
+#   clearly failing (val_rank1 < deployed-0.0969, aux FDI val acc < 0.88, or
+#   the aux loss is dominating triplet).
+experiment_name: embedding_fdi_init_aux_v1
+
+data:
+  manifest: identification/data/manifest_clean.csv
+  crop_mode: raw
+  target_col: person_id
+  num_workers: 0
+  pin_memory: false
+
+model:
+  backbone: resnet18
+  pretrained: true
+  embedding_dim: 128
+  dropout: 0.2
+
+init_from_classifier: identification/runs/tooth_fdi_raw/best.pt
+
+train:
+  epochs: 60
+  optimizer: AdamW
+  lr: 0.0001
+  weight_decay: 0.01
+  scheduler: cosine
+  warmup_epochs: 2
+
+sampler:
+  p: 16
+  k: 4
+
+loss:
+  type: triplet_margin
+  margin: 0.2
+
+miner:
+  type: multi_similarity
+  epsilon: 0.1
+
+# Phase 8.4 multi-task auxiliary loss
+aux_loss:
+  type: fdi
+  lambda: 0.1
+
+augmentation:
+  rotation_degrees: 10
+  translate: 0.05
+  brightness: 0.1
+  contrast: 0.1
+  blur_kernel: 3
+  blur_sigma_max: 0.5
+  noise_sigma: 0.01
+
+eval:
+  val_every_n_epochs: 3
+  patience: 10
+  save_best_metric: rank1
+
+killswitch:
+  epoch: 21        # first val epoch >= 20 (val cadence is every 3, so 21)
+  min_val_rank1: 0.0969  # match deployed embedder's best val_rank1
+  min_fdi_acc: 0.88      # backbone starts ~95% from FDI init; <88% means aux head broken
+  max_aux_ratio: 1.5     # lambda*aux/triplet > 1.5 means aux dominates -> halve lambda
+
+output:
+  dir: identification/runs/embedding_fdi_init_aux_v1
+  save_last: true
+  save_best: true
