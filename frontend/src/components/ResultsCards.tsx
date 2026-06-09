@@ -2,6 +2,7 @@
 
 import { InfoHint } from "@/components/InfoHint";
 import type {
+  AgeEstimate,
   OpenSetDecision,
   QueryProvenance,
   SearchResult,
@@ -25,6 +26,8 @@ export type ResultsState = {
   queryProvenance: QueryProvenance;
   expectedPersonId: string | null;
   simTop1Percentile: number | null;
+  // Phase 9.4 — Phase 8.10 age estimate (sex NOT wired; failed Pass).
+  ageEstimate: AgeEstimate | null;
 };
 
 type Props = {
@@ -166,6 +169,12 @@ const VERDICT_HINT =
 const PROVENANCE_HINT =
   "Self-match: the uploaded image is byte-identical to an enrolled image (sim ≈ 1.0 is tautological). Novel upload: the bytes don't match any enrolled image. Held-out · OOS: a curated out-of-distribution test image (Phase 9.8). The dataset has one panoramic per person, so 'self-match' and 'enrolled' are the same set here.";
 
+const AGE_HINT_DENSE =
+  "Estimated dental age from the Phase 8.10 regression head on the frozen embedder. Pre-registered test MAE = 0.93y on the 6-13y dense bucket, BUT that number is on GT-mean embeddings; the live demo uses YOLO-mean embeddings, so the real-world error is wider (~2y in smoke testing). The ±2.0y interval reflects this distribution shift. Sex is intentionally NOT shown — the sex head failed at chance (0.556 acc, CI overlaps chance baseline 0.539).";
+
+const AGE_HINT_SATURATED =
+  "Estimated dental age. Outside the 6-13y dense bucket the model is less reliable: 16-18y reported MAE = 2.09y (regression-ceiling effect — dental development is largely complete by 17, so the model saturates) AND there is a GT→YOLO embedding distribution shift on top. The ±3.0y interval reflects this honestly. Sex is intentionally NOT shown — the sex head failed at chance in Phase 8.10.";
+
 // ---------- ResultsCards ----------
 
 export function ResultsCards({ state, onReset }: Props) {
@@ -189,7 +198,7 @@ export function ResultsCards({ state, onReset }: Props) {
     <section className="rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <header className="flex flex-col gap-3 border-b border-slate-200 px-6 py-4 dark:border-slate-800 sm:flex-row sm:items-start sm:justify-between">
         <div className="space-y-2">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-lg font-semibold">Results</h2>
             <span
               className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${provenance.chip}`}
@@ -197,6 +206,27 @@ export function ResultsCards({ state, onReset }: Props) {
               {provenance.label}
               <InfoHint text={PROVENANCE_HINT} />
             </span>
+            {state.ageEstimate && (
+              <span
+                className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${
+                  state.ageEstimate.in_dense_bucket
+                    ? "bg-sky-500/15 text-sky-700 ring-sky-500/30 dark:text-sky-300"
+                    : "bg-slate-200 text-slate-600 ring-slate-300 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-600"
+                }`}
+              >
+                Estimated age: {state.ageEstimate.value.toFixed(1)}
+                {" ± "}
+                {((state.ageEstimate.ci_high - state.ageEstimate.ci_low) / 2).toFixed(1)}y
+                {!state.ageEstimate.in_dense_bucket && (
+                  <span className="ml-1 text-[10px] opacity-70">(saturated)</span>
+                )}
+                <InfoHint
+                  text={
+                    state.ageEstimate.in_dense_bucket ? AGE_HINT_DENSE : AGE_HINT_SATURATED
+                  }
+                />
+              </span>
+            )}
           </div>
           <p className="text-sm text-slate-500 dark:text-slate-400">
             {`Queried with ${state.nQueryTeeth} teeth`}

@@ -39,6 +39,7 @@ from identification.evaluation.evaluate_embedding import load_checkpoint as load
 from identification.models.classifier import ToothClassifier
 from identification.models.embedding_model import ToothEmbeddingModelWithMetadata
 from identification.models.retrieval_index import RetrievalIndex
+from identification.training.train_demographic_classifier import MLPHead as DemographicHead
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -115,6 +116,8 @@ class PipelineModels:
     # Phase 9.3 — sorted in_registry / oos sim_top1 arrays for percentile lookup.
     sim_top1_in_registry_sorted: np.ndarray | None = None
     sim_top1_oos_sorted: np.ndarray | None = None
+    # Phase 9.4 — Phase 8.10 age head (sex head NOT wired; failed Pass).
+    age_head: torch.nn.Module | None = None
     # Ensemble: parallel arrays of
     # (name, model, uses_metadata, fdi_label_map, crop_mode)
     ensemble_models: list[tuple[str, torch.nn.Module, bool, dict[str, int], str]] = field(
@@ -201,6 +204,24 @@ class PipelineModels:
             print(f"[pipeline] percentile tables: in_registry={len(in_reg_sims)} oos={len(oos_sims)} sim_top1 values")
         else:
             print(f"[pipeline] WARN: heldout_enrol.json not found at {heldout_path}; percentile field will be null")
+
+        # 4b-ter. Phase 9.4 — Phase 8.10 age regression head on the frozen
+        # embedder. Sex head intentionally NOT loaded (Phase 8.10 pre-registered
+        # rule: sex acc 0.556 ≈ chance baseline 0.539, fails the 0.65 marginal
+        # floor; wiring would mislead users).
+        age_head_path = PROJECT_ROOT / "identification/runs/demographic_v2/age_head.pt"
+        if age_head_path.exists():
+            try:
+                head = DemographicHead(in_dim=128, hidden=64, dropout=0.3, out_dim=1)
+                state = torch.load(age_head_path, map_location=self.device, weights_only=True)
+                head.load_state_dict(state)
+                head.to(self.device).eval()
+                self.age_head = head
+                print(f"[pipeline] Phase 8.10 age head loaded from {age_head_path}")
+            except Exception as exc:  # noqa: BLE001 — degrade gracefully
+                print(f"[pipeline] WARN: failed to load age head: {exc}")
+        else:
+            print(f"[pipeline] WARN: age head not found at {age_head_path}; age estimate will be null")
 
         # 4c. Phase 9.2 provenance — precompute SHA-256 of every registry
         # panoramic so we can flag self-match queries (re-uploads of an enrolled
@@ -720,6 +741,32 @@ async def run_pipeline(
         per_model_query_vecs = [_pool(a) for a in ensemble_emb_arrays]  # type: ignore[arg-type]
     query_vec = _pool(embeddings_arr)
 
+    # Phase 9.4 — Phase 8.10 age regression on the pooled query vector.
+    # Reported as the headline age + the 6-13y dense bucket flag (where MAE = 0.93y).
+    # Outside 6-13y the estimate saturates (16-18y MAE = 2.09y due to ceiling effect).
+    age_estimate: dict | None = None
+    if models.age_head is not None:
+        try:
+            with torch.no_grad():
+                q = torch.from_numpy(query_vec).unsqueeze(0).to(models.device)
+                pred = float(models.age_head(q).squeeze().item())
+            in_dense = 6.0 <= pred < 13.0
+            # CI half-width: Phase 8.10's reported MAE (0.93y dense / 2.09y outside)
+            # is on GT-mean embeddings; the live demo queries with YOLO-mean
+            # embeddings, so there is a documented distribution shift that
+            # widens the real-world error. Empirical smoke (n=5, 2026-06-09):
+            # MAE ≈ 1.8y across the full range. We use ±2.0y dense / ±3.0y
+            # outside as honest indicative spreads.
+            ci_half = 2.0 if in_dense else 3.0
+            age_estimate = {
+                "value": pred,
+                "ci_low": pred - ci_half,
+                "ci_high": pred + ci_half,
+                "in_dense_bucket": in_dense,
+            }
+        except Exception:
+            age_estimate = None
+
     # --- Stage F: FAISS search ---
     t0 = time.perf_counter()
     n_candidates = len(models.registry_index)
@@ -847,6 +894,8 @@ async def run_pipeline(
             "expected_person_id": expected_pid,
             # Phase 9.3 — empirical percentile of top-1 sim against 740 in-registry refs.
             "sim_top1_percentile": sim_top1_pct,
+            # Phase 9.4 — Phase 8.10 age estimate (sex head intentionally not wired).
+            "age_estimate": age_estimate,
         },
     }
 

@@ -69,6 +69,15 @@ export type StageCompleteData = {
   query_provenance?: QueryProvenance;
   expected_person_id?: string | null;
   sim_top1_percentile?: number | null;
+  // Phase 9.4 — Phase 8.10 age estimate (sex head NOT wired; failed Pass).
+  age_estimate?: AgeEstimate | null;
+};
+
+export type AgeEstimate = {
+  value: number;
+  ci_low: number;
+  ci_high: number;
+  in_dense_bucket: boolean;
 };
 
 export async function fetchRegistry(): Promise<RegistryListResponse> {

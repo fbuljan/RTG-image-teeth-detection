@@ -241,6 +241,7 @@ function applyEvent(
           queryProvenance: evt.data.query_provenance ?? "unknown",
           expectedPersonId: evt.data.expected_person_id ?? null,
           simTop1Percentile: evt.data.sim_top1_percentile ?? null,
+          ageEstimate: evt.data.age_estimate ?? null,
         });
         setPipeline((prev) => ({ ...prev, status: "Done." }));
       }
