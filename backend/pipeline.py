@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +42,16 @@ from identification.models.retrieval_index import RetrievalIndex
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _default_registry_dir() -> Path:
+    """Phase 9.1 — default to the YOLO-built registry to match the Phase 8.0
+    canonical baseline (R1 = 82.6% [79.8, 86.0]). Honour DEMO_USE_YOLO_REGISTRY=0
+    for one-line rollback to the legacy GT-built registry (R1 ≈ 57.3%).
+    """
+    if os.environ.get("DEMO_USE_YOLO_REGISTRY", "1") == "0":
+        return PROJECT_ROOT / "identification/registry"
+    return PROJECT_ROOT / "identification/registry_ensemble_yolo/embedding_fdi_init_v1"
+
+
 @dataclass
 class PipelineConfig:
     """Per-server configuration that drives the pipeline."""
@@ -49,7 +60,7 @@ class PipelineConfig:
     yolo_seg_weights: Path = PROJECT_ROOT / "runs-segmentation/default-seg/weights/best.pt"
     fdi_classifier: Path = PROJECT_ROOT / "identification/runs/tooth_fdi_raw/best.pt"
     embedder: Path = PROJECT_ROOT / "identification/runs/embedding_fdi_init_v1/best.pt"
-    registry_dir: Path = PROJECT_ROOT / "identification/registry"
+    registry_dir: Path = field(default_factory=_default_registry_dir)
     # Ensemble: per-model checkpoints + per-model registry directories. The
     # backend loads each one and ensembles cosine similarities at search time.
     ensemble_checkpoints: dict[str, Path] = field(default_factory=lambda: {
