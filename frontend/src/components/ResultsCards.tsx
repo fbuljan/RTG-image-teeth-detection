@@ -491,6 +491,14 @@ export function ResultsCards({ state, onReset, onFragmentResult }: Props) {
                   <div>
                     <div className="font-medium">
                       {r.fake_name}
+                      {r.is_session && (
+                        <span
+                          className="ml-2 inline-flex items-center rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700 ring-1 ring-inset ring-emerald-500/30 dark:text-emerald-300"
+                          title="From your session enrolments (Phase 9.7). Calibrated percentile / open-set verdict are NOT applied — Phase 8.6 calibration is canonical-only."
+                        >
+                          session
+                        </span>
+                      )}
                       {isGroundTruth && (
                         <span className="ml-2 text-xs font-normal text-slate-500 dark:text-slate-400">
                           (ground truth)

@@ -1,16 +1,18 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ExamplePicks } from "@/components/ExamplePicks";
 import { ModelCard } from "@/components/ModelCard";
 import { PipelineProgress, type PipelineState } from "@/components/PipelineProgress";
 import { RegistryList, type RegistryListHandle } from "@/components/RegistryList";
 import { AboutDemo } from "@/components/AboutDemo";
+import { EnrolModal } from "@/components/EnrolModal";
+import { SessionEnrolments } from "@/components/SessionEnrolments";
 import { ResultsCards, type ResultsState } from "@/components/ResultsCards";
 import { useToasts } from "@/components/Toaster";
 import { UploadZone } from "@/components/UploadZone";
-import { type RegistryPerson, type StageEvent } from "@/lib/api";
+import { getOrMintSessionId, type RegistryPerson, type StageEvent } from "@/lib/api";
 import { streamIdentify, type PipelineMode } from "@/lib/identify";
 
 const DEFAULT_MODE: PipelineMode = "segmentation";
@@ -38,6 +40,22 @@ export default function Page() {
   const pipelineRef = useRef<HTMLDivElement | null>(null);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const toasts = useToasts();
+  // Phase 9.7 — session enrolment state. session_id is minted lazily on first
+  // mount and persisted in localStorage; the parent passes it down to the
+  // modal + identify stream so identify-with-session-merge works.
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [showEnrolModal, setShowEnrolModal] = useState(false);
+  const [enrolmentsNonce, setEnrolmentsNonce] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    getOrMintSessionId().then((sid) => {
+      if (!cancelled) setSessionId(sid);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const clearResults = useCallback(() => {
     setPipeline(INITIAL_PIPELINE);
@@ -73,7 +91,12 @@ export default function Page() {
       try {
         // Reset the per-tooth cache for this new query (Phase 9.5).
         perToothRef.current = [];
-        for await (const evt of streamIdentify(file, { mode })) {
+        for await (const evt of streamIdentify(file, {
+          mode,
+          // Phase 9.7 — when present, backend merges this session's
+          // enrolments into the top-K. Calibration stays canonical-only.
+          sessionId: sessionId ?? undefined,
+        })) {
           // Phase 9.5 — capture per-tooth metadata from embed stage for fragment-search.
           if (
             evt.event === "stage_complete"
@@ -119,7 +142,18 @@ export default function Page() {
         setTimeout(() => URL.revokeObjectURL(uploadedPreview), 5000);
       }
     },
-    [selected, toasts, mode],
+    [selected, toasts, mode, sessionId],
+  );
+
+  // Phase 9.7 — "Verify by re-querying" from the EnrolModal triggers a normal
+  // identify on the freshly-enrolled panoramic; the session-merged top-K
+  // should put the session entry at rank 1 with sim ≈ 1.0.
+  const verifyEnrolment = useCallback(
+    (file: File) => {
+      setShowEnrolModal(false);
+      onIdentify(file);
+    },
+    [onIdentify],
   );
 
   return (
@@ -129,7 +163,18 @@ export default function Page() {
           <h1 className="text-3xl font-bold tracking-tight">
             Dental Identification Demo
           </h1>
-          <AboutDemo />
+          <div className="flex items-center gap-2">
+            {sessionId && (
+              <button
+                type="button"
+                onClick={() => setShowEnrolModal(true)}
+                className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800/60 dark:bg-emerald-950/30 dark:text-emerald-300 dark:hover:bg-emerald-900/40"
+              >
+                + Enrol new person
+              </button>
+            )}
+            <AboutDemo />
+          </div>
         </div>
         <p className="max-w-3xl text-sm text-slate-600 dark:text-slate-300">
           Pick a person from the registry, download their panoramic X-ray as
@@ -161,6 +206,14 @@ export default function Page() {
           clearResults();
         }}
       />
+
+      {sessionId && (
+        <SessionEnrolments
+          sessionId={sessionId}
+          refreshNonce={enrolmentsNonce}
+          onChanged={() => setEnrolmentsNonce((n) => n + 1)}
+        />
+      )}
 
       <UploadZone
         busy={busy}
@@ -219,6 +272,15 @@ export default function Page() {
       )}
 
       <ModelCard />
+
+      {showEnrolModal && sessionId && (
+        <EnrolModal
+          sessionId={sessionId}
+          onClose={() => setShowEnrolModal(false)}
+          onEnrolled={() => setEnrolmentsNonce((n) => n + 1)}
+          onVerifyRequest={verifyEnrolment}
+        />
+      )}
     </main>
   );
 }

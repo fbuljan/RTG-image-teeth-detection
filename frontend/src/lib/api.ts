@@ -21,7 +21,12 @@ export type SearchResult = {
   similarity: number;
   // Phase 9.3 — empirical percentile of this similarity against the 740
   // in-registry sim_top1 values from Phase 8.6 held-out enrolment.
+  // Phase 9.7 — null when this result is a session enrolment OR not the
+  // canonical top-1; calibration is canonical-only.
   similarity_percentile?: number | null;
+  // Phase 9.7 — true when this result came from the caller's session
+  // enrolments rather than the canonical 1,178-person registry.
+  is_session?: boolean;
 };
 
 // Phase 9.2 — Phase 8.6 locked open-set decision.
@@ -130,6 +135,121 @@ export async function fetchRegistry(): Promise<RegistryListResponse> {
   const res = await fetch(`${API_BASE}/api/registry`, { cache: "no-store" });
   if (!res.ok) throw new Error(`Failed to fetch registry: ${res.status}`);
   return res.json();
+}
+
+// ---------- Phase 9.7 — session enrolment ----------
+
+const SESSION_STORAGE_KEY = "dental-demo.session_id";
+
+/** Return the caller's session id, minting + persisting a new one on first
+ *  use. Lives in localStorage so it survives reloads but is scoped per
+ *  browser. The backend regex requires lowercase hex, ≤32 chars. */
+export async function getOrMintSessionId(): Promise<string> {
+  if (typeof window === "undefined") {
+    // SSR / tests — generate but don't persist.
+    const r = await fetch(`${API_BASE}/api/session/new`);
+    const d = await r.json();
+    return d.session_id;
+  }
+  const stored = window.localStorage.getItem(SESSION_STORAGE_KEY);
+  if (stored && /^[a-f0-9]{1,32}$/.test(stored)) return stored;
+  const r = await fetch(`${API_BASE}/api/session/new`);
+  if (!r.ok) throw new Error(`Failed to mint session id: ${r.status}`);
+  const d = await r.json();
+  window.localStorage.setItem(SESSION_STORAGE_KEY, d.session_id);
+  return d.session_id;
+}
+
+/** Force a brand-new session id (used by "clear my enrolments" → "start
+ *  fresh"). Returns the new id. */
+export async function rotateSessionId(): Promise<string> {
+  if (typeof window !== "undefined") {
+    window.localStorage.removeItem(SESSION_STORAGE_KEY);
+  }
+  return getOrMintSessionId();
+}
+
+export type SessionEnrolment = {
+  person_id: string;
+  fake_name: string;
+  n_teeth: number;
+  enrolled_at: number;
+  panoramic_filename?: string;
+  note?: string;
+};
+
+export type EnrolResponse =
+  | {
+      status: "enrolled";
+      person: SessionEnrolment;
+      open_set_score_at_enrol: number | null;
+    }
+  | {
+      status: "duplicate_likely";
+      duplicate_z_threshold: number;
+      open_set_score: number;
+      matched_person_id: string;
+      matched_fake_name: string;
+      matched_source: "session" | "canonical";
+      matched_similarity: number;
+      n_teeth: number;
+    };
+
+export async function postEnrol(opts: {
+  sessionId: string;
+  file: File;
+  fakeName: string;
+  note?: string;
+  mode?: "segmentation" | "detection";
+  force?: boolean;
+}): Promise<EnrolResponse> {
+  const fd = new FormData();
+  fd.append("file", opts.file);
+  fd.append("fake_name", opts.fakeName);
+  if (opts.note) fd.append("note", opts.note);
+  fd.append("mode", opts.mode ?? "segmentation");
+  if (opts.force) fd.append("force", "true");
+  const r = await fetch(`${API_BASE}/api/enrol`, {
+    method: "POST",
+    headers: { "X-Session-Id": opts.sessionId },
+    body: fd,
+  });
+  if (!r.ok) {
+    const txt = await r.text().catch(() => r.statusText);
+    throw new Error(`Enrol failed: ${r.status} ${txt}`);
+  }
+  return r.json();
+}
+
+export type EnrolmentListResponse = {
+  session_id: string;
+  n_persons: number;
+  persons: SessionEnrolment[];
+};
+
+export async function fetchEnrolments(sessionId: string): Promise<EnrolmentListResponse> {
+  const r = await fetch(`${API_BASE}/api/enrol`, {
+    headers: { "X-Session-Id": sessionId },
+    cache: "no-store",
+  });
+  if (!r.ok) throw new Error(`Failed to list enrolments: ${r.status}`);
+  return r.json();
+}
+
+export async function deleteEnrolment(sessionId: string, personId: string): Promise<void> {
+  const r = await fetch(`${API_BASE}/api/enrol/${encodeURIComponent(personId)}`, {
+    method: "DELETE",
+    headers: { "X-Session-Id": sessionId },
+  });
+  if (!r.ok) throw new Error(`Delete failed: ${r.status}`);
+}
+
+export async function clearSessionEnrolments(sessionId: string): Promise<void> {
+  const r = await fetch(`${API_BASE}/api/enrol`, {
+    method: "DELETE",
+    headers: { "X-Session-Id": sessionId },
+  });
+  if (!r.ok) throw new Error(`Clear failed: ${r.status}`);
 }
 
 export function panoramicDownloadUrl(personId: string): string {

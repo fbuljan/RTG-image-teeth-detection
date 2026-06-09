@@ -76,6 +76,7 @@ class PipelineConfig:
     # "Deployment caveat" in thesis_notes.md for the full story.
     ensemble_registry_dir: Path = PROJECT_ROOT / "identification/registry_ensemble_yolo"
     temp_dir: Path = PROJECT_ROOT / "backend/temp"
+    sessions_dir: Path = PROJECT_ROOT / "backend/sessions"
     yolo_conf: float = 0.25
     yolo_iou: float = 0.45
     yolo_imgsz: int = 640
@@ -632,12 +633,144 @@ def _query_provenance(upload_path: Path, sha256_to_pid: dict[str, str]) -> tuple
     return "self_match", pid
 
 
+def compute_query_vector_sync(
+    panoramic_path: Path,
+    models: PipelineModels,
+    mode: str = "segmentation",
+) -> dict:
+    """Phase 9.7 — non-streaming Stage A→E for the enrolment endpoint.
+
+    Runs the same single-model path as ``run_pipeline`` (YOLO → bbox crops →
+    FDI classification + dedup → ResNet embedder → mean+L2 pool) but as a
+    plain blocking call with no SSE bookkeeping. ``/api/enrol`` calls this
+    directly so the modal can show a spinner instead of building a duplicate
+    SSE consumer.
+
+    Intentionally does NOT touch the registry index, run open-set scoring, or
+    write any temp files — those concerns belong to the caller (which may
+    decide to enrol, reject as a duplicate, or skip the embedding entirely).
+
+    Returns::
+
+        {
+            "query_vec": np.ndarray (D,) float32, L2-normed,
+            "embeddings_arr": np.ndarray (n, D) float32, L2-normed per-tooth,
+            "fdi_kept": list[str],
+            "fdi_conf_kept": list[float],
+            "bboxes_kept": np.ndarray (n, 4) float32,
+            "n_teeth": int,
+        }
+
+    Raises ``ValueError`` with a user-facing message if YOLO finds no teeth
+    or FDI deduplication leaves nothing.
+    """
+    cfg = models.config
+    device = models.device
+    if mode not in ("detection", "segmentation"):
+        mode = cfg.default_mode
+
+    # --- Stage A: YOLO (single-pass, no streaming) ---
+    yolo_model = models.yolo if mode == "detection" else models.yolo_seg
+    results = yolo_model.predict(
+        source=str(panoramic_path),
+        conf=cfg.yolo_conf,
+        iou=cfg.yolo_iou,
+        imgsz=cfg.yolo_imgsz,
+        verbose=False,
+        device=device if device != "mps" else "mps",
+    )
+    if not results:
+        raise ValueError("YOLO returned no results — is this a panoramic X-ray?")
+    res0 = results[0]
+    boxes = res0.boxes
+    if boxes is None or boxes.xyxy is None or len(boxes.xyxy) == 0:
+        raise ValueError("No teeth found in this image — is it a panoramic X-ray?")
+    bboxes = boxes.xyxy.cpu().numpy()
+
+    if mode == "segmentation":
+        masks_obj = getattr(res0, "masks", None)
+        if masks_obj is None or masks_obj.xy is None or len(masks_obj.xy) == 0:
+            raise ValueError("Segmenter found no tooth masks.")
+        polygons = [np.asarray(p) for p in masks_obj.xy]
+        derived = []
+        for poly in polygons:
+            xs, ys = poly[:, 0], poly[:, 1]
+            derived.append([float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())])
+        bboxes = np.asarray(derived)
+
+    # --- Stage B: Crops ---
+    pano = Image.open(panoramic_path).convert("RGB")
+    crops: list[Image.Image] = []
+    for (x1, y1, x2, y2) in bboxes:
+        ex1, ey1, ex2, ey2 = _expand_bbox(
+            (float(x1), float(y1), float(x2), float(y2)), pano.size, padding_ratio=0.1
+        )
+        crops.append(pano.crop((ex1, ey1, ex2, ey2)))
+
+    # --- Stage C: FDI classification + dedup ---
+    with torch.no_grad():
+        logits_all = [models.fdi_classifier(_to_tensor(c, cfg.crop_size, device)) for c in crops]
+    logits_tensor = torch.cat(logits_all, dim=0)
+    probs = F.softmax(logits_tensor, dim=1).cpu().numpy()
+    fdi_class_idx = probs.argmax(axis=1)
+    fdi_confidences = probs.max(axis=1)
+    fdi_labels = [models.fdi_label_inv[idx] for idx in fdi_class_idx]
+
+    seen: dict[str, int] = {}
+    keep_indices: list[int] = []
+    for i, fdi in enumerate(fdi_labels):
+        if fdi in seen and fdi_confidences[i] <= fdi_confidences[seen[fdi]]:
+            continue
+        if fdi in seen:
+            keep_indices.remove(seen[fdi])
+        seen[fdi] = i
+        keep_indices.append(i)
+    keep_indices.sort()
+
+    if not keep_indices:
+        raise ValueError("No teeth survived FDI assignment.")
+
+    fdi_kept = [fdi_labels[i] for i in keep_indices]
+    fdi_conf_kept = [float(fdi_confidences[i]) for i in keep_indices]
+    crops_kept = [crops[i] for i in keep_indices]
+    bboxes_kept = bboxes[keep_indices]
+
+    # --- Stage D: Embeddings (single model — enrolment never uses the ensemble) ---
+    embeddings = []
+    with torch.no_grad():
+        for crop, fdi in zip(crops_kept, fdi_kept):
+            tensor = _to_tensor(crop, cfg.crop_size, device)
+            if models.embedder_uses_metadata:
+                fdi_idx = models.embedder_fdi_label_map.get(fdi, 0)
+                fdi_t = torch.tensor([fdi_idx], dtype=torch.long, device=device)
+                emb = models.embedder(tensor, fdi_t)
+            else:
+                emb = models.embedder(tensor)
+            embeddings.append(emb.cpu().numpy()[0])
+    embeddings_arr = np.stack(embeddings).astype(np.float32)
+
+    # --- Stage E: mean + L2 ---
+    pooled = embeddings_arr.mean(axis=0)
+    n = float(np.linalg.norm(pooled))
+    query_vec = (pooled / n if n > 1e-12 else pooled).astype(np.float32)
+
+    return {
+        "query_vec": query_vec,
+        "embeddings_arr": embeddings_arr,
+        "fdi_kept": fdi_kept,
+        "fdi_conf_kept": fdi_conf_kept,
+        "bboxes_kept": bboxes_kept,
+        "n_teeth": int(len(fdi_kept)),
+    }
+
+
 async def run_pipeline(
     panoramic_path: Path,
     query_id: str,
     models: PipelineModels,
     mode: str = "segmentation",
     ensemble: bool = False,
+    session_id: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Stream pipeline events as the query is processed.
 
@@ -1034,22 +1167,87 @@ async def run_pipeline(
         sims, neighbor_ids = models.registry_index.search(query_vec, k=cfg.top_k)
     timings["search"] = (time.perf_counter() - t0) * 1000
 
+    # Phase 9.7 — merge session enrolments (if any) by raw cosine. Session
+    # results carry a `is_session=True` flag downstream so the UI can badge
+    # them. We assemble in-place rather than reordering arrays because the
+    # downstream tooth-contribution / open-set blocks expect `sims` to remain
+    # the canonical-only ranking (sim_top1 calibration was learned on canonical
+    # data and would be invalid if session enrolments displaced it).
+    session_meta_by_pid: dict[str, dict] = {}
+    session_results: list[dict] = []
+    if session_id is not None:
+        try:
+            import importlib
+            sessions_module = importlib.import_module("backend.sessions")
+            session_index = sessions_module.load_session_index(
+                cfg.sessions_dir, session_id, dim=query_vec.shape[0]
+            )
+            if session_index is not None and len(session_index) > 0:
+                session_meta = sessions_module.load_session_meta(
+                    cfg.sessions_dir, session_id
+                ) or {}
+                for p in session_meta.get("persons", []):
+                    session_meta_by_pid[p["person_id"]] = p
+                k_session = min(cfg.top_k, len(session_index))
+                ssims, sids = session_index.search(query_vec, k=k_session)
+                for sim, sid in zip(ssims, sids):
+                    m = session_meta_by_pid.get(sid, {})
+                    session_results.append({
+                        "person_id": sid,
+                        "fake_name": m.get("fake_name", sid),
+                        "n_teeth": int(m.get("n_teeth", 0)) or None,
+                        "similarity": float(sim),
+                        "is_session": True,
+                    })
+        except Exception as exc:  # noqa: BLE001
+            # Session merge is best-effort. A bad session dir shouldn't take
+            # down the whole identify response — log and continue with the
+            # canonical-only ranking.
+            print(f"[pipeline] session merge failed (session_id={session_id}): {exc}")
+
     # --- Stage G: Assemble result ---
-    results_list = []
-    for rank, (sim, person_id) in enumerate(zip(sims, neighbor_ids)):
+    canonical_results = []
+    for sim, person_id in zip(sims, neighbor_ids):
         meta = models.registry_meta.get(person_id, {})
-        results_list.append({
-            "rank": rank + 1,
+        canonical_results.append({
             "person_id": person_id,
             "fake_name": meta.get("fake_name", person_id),
             "n_teeth": meta.get("n_teeth"),
             "similarity": float(sim),
+            "is_session": False,
         })
 
-    top1_top2_gap = float(sims[0] - sims[1]) if len(sims) > 1 else 1.0
-    confidence = _confidence_label(float(sims[0]), float(sims[1]) if len(sims) > 1 else 0.0)
+    # Merge by raw cosine, take top_k. Session entries float to the top if
+    # their similarity beats the canonical neighbours, which is exactly the
+    # "self-match after enrolment" case the verify-by-re-query flow needs.
+    merged = sorted(
+        canonical_results + session_results,
+        key=lambda r: r["similarity"],
+        reverse=True,
+    )[: cfg.top_k]
+    results_list = []
+    for rank, r in enumerate(merged):
+        results_list.append({
+            "rank": rank + 1,
+            **r,
+        })
+
+    # Calibrated quantities — `top1_top2_gap`, `confidence`, `open_set_*`,
+    # `similarity_percentile`, `age_estimate` — are all computed off the
+    # CANONICAL top-1 / top-2 (sims[0], sims[1]). The Phase 8.6 thresholds
+    # were learned on canonical pairs; extending them to session entries
+    # would invalidate the calibration semantics. The session-merge contract
+    # is "session entries may displace canonical entries in the visible
+    # ranking, but calibrated trust never extends to them."
+    canonical_top1 = float(sims[0])
+    canonical_top2 = float(sims[1]) if len(sims) > 1 else 0.0
+    top1_top2_gap = canonical_top1 - canonical_top2 if len(sims) > 1 else 1.0
+    confidence = _confidence_label(canonical_top1, canonical_top2)
 
     # Phase 9.2 — Phase 8.6 calibrated open-set decision + provenance.
+    # Always computed on the CANONICAL top-1 (sims[0]), never on a session
+    # self-match — calibration was learned on the canonical 1,178-person
+    # distribution and is not transferable to session enrolments.
     open_set_score, open_set_decision = _open_set_score(
         float(sims[0]), models.open_set_calibration,
     )
@@ -1066,22 +1264,43 @@ async def run_pipeline(
     )
     # Phase 9.3 — empirical percentile of sim_top1 vs known-correct identifications.
     sim_top1_pct = _sim_top1_percentile(float(sims[0]), models.sim_top1_in_registry_sorted)
-    # Percentile is only well-defined for rank-1 (the reference distribution is
-    # rank-1 hits from held-out correct identifications). Emit null for ranks
-    # 2-5 — see audit note in _build_search_payload.
+    # Percentile is well-defined ONLY for the canonical top-1 against the
+    # canonical reference distribution (740 rank-1 hits from held-out
+    # enrolment). Session entries get None. The canonical top-1 may sit at
+    # any merged rank (a session entry can displace it to rank 2 etc), so
+    # we identify it by person_id rather than by rank position.
+    canonical_top1_pid = str(neighbor_ids[0]) if len(neighbor_ids) > 0 else None
     for r in results_list:
-        r["similarity_percentile"] = (
-            _sim_top1_percentile(r["similarity"], models.sim_top1_in_registry_sorted)
-            if r["rank"] == 1
-            else None
-        )
+        if (
+            not r.get("is_session")
+            and r["person_id"] == canonical_top1_pid
+        ):
+            r["similarity_percentile"] = _sim_top1_percentile(
+                r["similarity"], models.sim_top1_in_registry_sorted
+            )
+        else:
+            r["similarity_percentile"] = None
 
     # Per-tooth contribution: dot each tooth's embedding against the top-1
     # gallery profile. In ensemble mode we average the per-model contributions.
+    # Phase 9.7 — when the top-1 is a session enrolment, reconstruct from the
+    # session index instead of the canonical one.
     tooth_contributions: list[dict] = []
     try:
         top1_person = results_list[0]["person_id"]
-        if ensemble:
+        top1_is_session = bool(results_list[0].get("is_session"))
+        if top1_is_session and session_id is not None:
+            import importlib
+            sessions_module = importlib.import_module("backend.sessions")
+            session_index = sessions_module.load_session_index(
+                cfg.sessions_dir, session_id, dim=query_vec.shape[0]
+            )
+            if session_index is None:
+                raise RuntimeError("session top-1 but no session index available")
+            top1_faiss_idx = session_index.person_ids.index(top1_person)
+            top1_vec = session_index.index.reconstruct(top1_faiss_idx)
+            per_tooth_sims = embeddings_arr @ top1_vec
+        elif ensemble:
             per_tooth_sims_acc = np.zeros(len(embeddings_arr), dtype=np.float64)
             for j, index in enumerate(models.ensemble_indexes):
                 top1_idx = index.person_ids.index(top1_person)

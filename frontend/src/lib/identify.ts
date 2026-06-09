@@ -10,15 +10,26 @@ export type PipelineMode = "detection" | "segmentation";
 
 export async function* streamIdentify(
   file: File,
-  options: { mode?: PipelineMode; signal?: AbortSignal } = {},
+  options: {
+    mode?: PipelineMode;
+    signal?: AbortSignal;
+    sessionId?: string;
+  } = {},
 ): AsyncGenerator<StageEvent> {
   const form = new FormData();
   form.append("file", file);
   form.append("mode", options.mode ?? "segmentation");
 
+  // Phase 9.7 — opt-in session merge. If the caller didn't pass a session id
+  // (e.g. they haven't enrolled yet), we just omit the header and the
+  // backend returns the canonical-only ranking.
+  const headers: Record<string, string> = {};
+  if (options.sessionId) headers["X-Session-Id"] = options.sessionId;
+
   const res = await fetch(`${API_BASE}/api/identify`, {
     method: "POST",
     body: form,
+    headers,
     signal: options.signal,
   });
   if (!res.ok || !res.body) {

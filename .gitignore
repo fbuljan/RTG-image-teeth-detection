@@ -203,6 +203,7 @@ identification/registry_ensemble_yolo/
 
 # Phase 6 demo
 backend/temp/
+backend/sessions/
 backend/__pycache__/
 frontend/node_modules/
 frontend/.next/
