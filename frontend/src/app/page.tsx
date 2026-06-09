@@ -234,6 +234,13 @@ function applyEvent(
           toothContributions: evt.data.tooth_contributions,
           selectedPersonId: selected?.person_id,
           selectedFakeName: selected?.fake_name,
+          // Phase 9.3 — calibrated open-set + provenance from the backend.
+          openSetScore: evt.data.open_set_score ?? null,
+          openSetDecision: evt.data.open_set_decision ?? "unknown",
+          openSetThreshold: evt.data.open_set_threshold ?? null,
+          queryProvenance: evt.data.query_provenance ?? "unknown",
+          expectedPersonId: evt.data.expected_person_id ?? null,
+          simTop1Percentile: evt.data.sim_top1_percentile ?? null,
         });
         setPipeline((prev) => ({ ...prev, status: "Done." }));
       }

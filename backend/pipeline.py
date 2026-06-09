@@ -112,6 +112,9 @@ class PipelineModels:
     # Phase 9.2 — Phase 8.6 open-set calibration (locked) + provenance hash index.
     open_set_calibration: dict | None = None
     panoramic_sha256_to_pid: dict[str, str] = field(default_factory=dict)
+    # Phase 9.3 — sorted in_registry / oos sim_top1 arrays for percentile lookup.
+    sim_top1_in_registry_sorted: np.ndarray | None = None
+    sim_top1_oos_sorted: np.ndarray | None = None
     # Ensemble: parallel arrays of
     # (name, model, uses_metadata, fdi_label_map, crop_mode)
     ensemble_models: list[tuple[str, torch.nn.Module, bool, dict[str, int], str]] = field(
@@ -177,6 +180,27 @@ class PipelineModels:
             print(f"[pipeline] open-set calibration loaded (threshold z = {thr:.4f}, mode = {self.open_set_calibration['mode']})")
         else:
             print(f"[pipeline] WARN: open-set calibration not found at {calib_path}; open_set_decision will be 'unknown'")
+
+        # 4b-bis. Phase 9.3 — load held-out enrolment records to build percentile
+        # lookup tables. Lets us show "your sim_top1 is at the 73rd percentile
+        # of correct identifications" instead of bare cosine.
+        heldout_path = PROJECT_ROOT / "identification/runs/phase8_deployed_yolo_reg/heldout_enrol.json"
+        if heldout_path.exists():
+            with open(heldout_path) as f:
+                heldout = json.load(f)
+            in_reg_sims = sorted(
+                r["sim_top1"] for r in heldout.get("records", [])
+                if r.get("label") == "in_registry"
+            )
+            oos_sims = sorted(
+                r["sim_top1"] for r in heldout.get("records", [])
+                if r.get("label") == "oos"
+            )
+            self.sim_top1_in_registry_sorted = np.array(in_reg_sims, dtype=np.float64) if in_reg_sims else None
+            self.sim_top1_oos_sorted = np.array(oos_sims, dtype=np.float64) if oos_sims else None
+            print(f"[pipeline] percentile tables: in_registry={len(in_reg_sims)} oos={len(oos_sims)} sim_top1 values")
+        else:
+            print(f"[pipeline] WARN: heldout_enrol.json not found at {heldout_path}; percentile field will be null")
 
         # 4c. Phase 9.2 provenance — precompute SHA-256 of every registry
         # panoramic so we can flag self-match queries (re-uploads of an enrolled
@@ -321,6 +345,23 @@ def _open_set_score(top1_sim: float, calibration: dict | None) -> tuple[float | 
     threshold = calibration["operating_point"]["threshold"]
     decision = "in_registry" if score >= threshold else "rejected"
     return float(score), decision
+
+
+def _sim_top1_percentile(
+    sim: float, sorted_arr: np.ndarray | None,
+) -> float | None:
+    """Phase 9.3 — what fraction of reference sim_top1 values are below this one?
+
+    With `sorted_arr` = sorted in-registry sim_top1s (740 values from Phase 8.6
+    held-out enrolment), the returned percentile answers "of all *correct*
+    identifications in the test eval, what fraction had a lower sim than this
+    query?" — a far more legible signal than raw cosine.
+    """
+    if sorted_arr is None or len(sorted_arr) == 0:
+        return None
+    # Position in sorted array (right-side gives strict-less-than count).
+    idx = int(np.searchsorted(sorted_arr, sim, side="right"))
+    return float(idx) / float(len(sorted_arr))
 
 
 def _query_provenance(upload_path: Path, sha256_to_pid: dict[str, str]) -> tuple[str, str | None]:
@@ -746,6 +787,13 @@ async def run_pipeline(
     query_provenance, expected_pid = _query_provenance(
         panoramic_path, models.panoramic_sha256_to_pid,
     )
+    # Phase 9.3 — empirical percentile of sim_top1 vs known-correct identifications.
+    sim_top1_pct = _sim_top1_percentile(float(sims[0]), models.sim_top1_in_registry_sorted)
+    # Per-result percentile (so the UI can render each rank with a percentile).
+    for r in results_list:
+        r["similarity_percentile"] = _sim_top1_percentile(
+            r["similarity"], models.sim_top1_in_registry_sorted,
+        )
 
     # Per-tooth contribution: dot each tooth's embedding against the top-1
     # gallery profile. In ensemble mode we average the per-model contributions.
@@ -797,6 +845,8 @@ async def run_pipeline(
             ),
             "query_provenance": query_provenance,
             "expected_person_id": expected_pid,
+            # Phase 9.3 — empirical percentile of top-1 sim against 740 in-registry refs.
+            "sim_top1_percentile": sim_top1_pct,
         },
     }
 

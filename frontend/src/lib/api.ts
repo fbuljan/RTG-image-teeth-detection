@@ -19,7 +19,20 @@ export type SearchResult = {
   fake_name: string;
   n_teeth: number | null;
   similarity: number;
+  // Phase 9.3 — empirical percentile of this similarity against the 740
+  // in-registry sim_top1 values from Phase 8.6 held-out enrolment.
+  similarity_percentile?: number | null;
 };
+
+// Phase 9.2 — Phase 8.6 locked open-set decision.
+export type OpenSetDecision = "in_registry" | "rejected" | "unknown";
+
+// Phase 9.2 — provenance of the uploaded query.
+// "self_match"  — exact bytes of an enrolled panoramic (tautological match).
+// "novel"       — bytes do not match any enrolled image.
+// "heldout"     — reserved for Phase 9.8 curated OOS picks.
+// "unknown"     — could not classify (filesystem error etc.).
+export type QueryProvenance = "self_match" | "novel" | "heldout" | "unknown";
 
 export type StageEvent =
   | { event: "stage_start"; data: { stage: string; message: string; total?: number } }
@@ -49,6 +62,13 @@ export type StageCompleteData = {
   n_query_teeth?: number;
   elapsed_ms?: number;
   tooth_contributions?: ToothContribution[];
+  // Phase 9.2/9.3 — calibrated open-set + provenance (locked Phase 8.6 cal).
+  open_set_score?: number | null;
+  open_set_decision?: OpenSetDecision;
+  open_set_threshold?: number | null;
+  query_provenance?: QueryProvenance;
+  expected_person_id?: string | null;
+  sim_top1_percentile?: number | null;
 };
 
 export async function fetchRegistry(): Promise<RegistryListResponse> {
