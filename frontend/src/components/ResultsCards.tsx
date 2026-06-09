@@ -34,6 +34,10 @@ export type ResultsState = {
   // Phase 9.5 — fragment-search support.
   queryId: string | null;
   perTooth: PerTooth[];
+  // Phase 9.6 — true when the query came in via /api/identify-crops; flips
+  // the results-header copy from "Queried with N teeth" to "Matched from N
+  // pre-cropped teeth."
+  cropsMode?: boolean;
 };
 
 type Props = {
@@ -385,7 +389,9 @@ export function ResultsCards({ state, onReset, onFragmentResult }: Props) {
             })()}
           </div>
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            {`Queried with ${state.nQueryTeeth} teeth`}
+            {state.cropsMode
+              ? `Matched from ${state.nQueryTeeth} pre-cropped teeth`
+              : `Queried with ${state.nQueryTeeth} teeth`}
             {state.nDropped > 0 ? ` · ${state.nDropped} duplicates dropped` : ""}
           </p>
         </div>

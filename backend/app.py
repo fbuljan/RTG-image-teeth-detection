@@ -14,6 +14,7 @@ Run locally:
 from __future__ import annotations
 
 import csv
+import io
 import json
 import re
 import shutil
@@ -31,6 +32,7 @@ from backend.pipeline import (
     PipelineModels,
     cleanup_temp_dir,
     compute_query_vector_sync,
+    run_crops_pipeline,
     run_fragment_search,
     run_pipeline,
 )
@@ -376,6 +378,107 @@ def search_fragment(req: FragmentSearchRequest) -> dict:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ---------- Phase 9.6 — pre-cropped tooth upload ----------
+
+
+# Bound the number of crops per request — matches the FDI label space (32)
+# plus a small buffer. Anything larger means the user is uploading garbage.
+MAX_CROPS_PER_QUERY = 32
+# Per-crop file size. Tooth crops are typically tens of KB; cap at 5 MB so
+# a single bad file doesn't OOM the embedder.
+MAX_CROP_BYTES = 5 * 1024 * 1024
+
+
+@app.post("/api/identify-crops")
+async def identify_crops(
+    files: list[UploadFile] = File(...),
+    fdi_overrides_json: str | None = Form(None),
+    session_id: str | None = Header(None, alias="X-Session-Id"),
+) -> EventSourceResponse:
+    """Phase 9.6 — identify from pre-cropped tooth images.
+
+    Each file in `files` is a single tooth crop (PNG/JPG). `fdi_overrides_json`
+    is an optional JSON-encoded array of length `len(files)` where each entry
+    is either a string FDI label (e.g. "11", "23") or null (auto-detect).
+
+    Reuses the canonical embedder + FAISS index. Calibration semantics are
+    inherited from /api/identify — open-set, percentile, age all key off the
+    canonical sims[0]. Session merge respected when `X-Session-Id` is set.
+    """
+    cleanup_temp_dir(config.temp_dir)
+
+    if not files:
+        raise HTTPException(status_code=400, detail="No files supplied")
+    if len(files) > MAX_CROPS_PER_QUERY:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Too many crops — max {MAX_CROPS_PER_QUERY} per query.",
+        )
+
+    fdi_overrides: list[str | None] | None = None
+    if fdi_overrides_json:
+        try:
+            parsed = json.loads(fdi_overrides_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"fdi_overrides_json invalid: {exc}")
+        if not isinstance(parsed, list) or len(parsed) != len(files):
+            raise HTTPException(
+                status_code=400,
+                detail="fdi_overrides_json must be a JSON array with one entry per file",
+            )
+        normalised: list[str | None] = []
+        for v in parsed:
+            if v is None or v == "":
+                normalised.append(None)
+            elif isinstance(v, str):
+                normalised.append(v.strip() or None)
+            else:
+                raise HTTPException(status_code=400, detail="fdi_overrides_json entries must be strings or null")
+        fdi_overrides = normalised
+
+    effective_session_id = (
+        session_id if session_store.is_valid_session_id(session_id) else None
+    )
+
+    # Read + validate every upload into a PIL Image up-front. Cheaper than
+    # streaming and the OOD gate needs them all before any of them can run
+    # through the embedder.
+    from PIL import Image as _Image  # local import keeps PIL out of startup path
+    crop_images = []
+    for i, uf in enumerate(files):
+        data = await uf.read()
+        if len(data) > MAX_CROP_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"file {i} exceeds {MAX_CROP_BYTES // (1024*1024)} MB cap",
+            )
+        try:
+            img = _Image.open(io.BytesIO(data)).convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"file {i} is not a readable image: {exc}")
+        crop_images.append(img)
+
+    query_id = uuid.uuid4().hex[:12]
+
+    async def event_stream():
+        try:
+            async for event in run_crops_pipeline(
+                crop_images,
+                query_id,
+                models,
+                fdi_overrides=fdi_overrides,
+                session_id=effective_session_id,
+            ):
+                yield {"event": event["event"], "data": json.dumps(event["data"])}
+        except Exception as exc:  # noqa: BLE001
+            yield {
+                "event": "error",
+                "data": json.dumps({"message": f"Crops pipeline failed: {exc}"}),
+            }
+
+    return EventSourceResponse(event_stream())
 
 
 # ---------- Phase 9.7 — session enrolment ----------

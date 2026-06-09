@@ -81,6 +81,27 @@ export type StageCompleteData = {
   // POST /api/search-fragment for sub-100ms re-pooling on a subset.
   query_id?: string;
   per_tooth?: PerTooth[];
+  // Phase 9.6 — pre-cropped tooth upload. `validate` stage replaces
+  // detect/fdi for the crops path; `crops_mode` is set on the search-stage
+  // event so the UI can switch the results-header copy.
+  n_uploaded?: number;
+  n_failed_ood?: number;
+  n_kept?: number;
+  n_dropped_duplicates?: number;
+  per_crop?: PerCrop[];
+  crops_mode?: boolean;
+};
+
+// Phase 9.6 — per-input-crop record emitted by the validate stage.
+export type PerCrop = {
+  input_index: number;
+  auto_fdi: string;
+  auto_fdi_confidence: number;
+  chosen_fdi: string;
+  source: "auto" | "override";
+  failed_ood: boolean;
+  dropped_as_duplicate: boolean;
+  kept: boolean;
 };
 
 export type AgeEstimate = {

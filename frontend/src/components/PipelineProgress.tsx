@@ -16,6 +16,9 @@ export type PipelineState = {
   embedProgress?: { current: number; total: number };
   toothCount?: number;
   mode: "detection" | "segmentation";
+  // Phase 9.6 — when true, stageA label becomes "Validate" and the FDI
+  // stage is hidden (validate folds FDI assignment + dedup + OOD gate).
+  cropsMode?: boolean;
 };
 
 type Props = {
@@ -29,9 +32,15 @@ const STAGE_KEYS: Array<{ key: keyof PipelineState }> = [
   { key: "search" },
 ];
 
-const STAGE_LABELS: Record<keyof PipelineState, string> | Record<string, string> = {};
-function labelFor(key: string, mode: "detection" | "segmentation"): string {
-  if (key === "stageA") return mode === "segmentation" ? "Segment" : "Detect";
+function labelFor(
+  key: string,
+  mode: "detection" | "segmentation",
+  cropsMode: boolean,
+): string {
+  if (key === "stageA") {
+    if (cropsMode) return "Validate";
+    return mode === "segmentation" ? "Segment" : "Detect";
+  }
   if (key === "fdi") return "Number";
   if (key === "embed") return "Embed";
   if (key === "search") return "Search";
@@ -52,7 +61,11 @@ export function PipelineProgress({ state }: Props) {
           <p className="text-sm text-slate-500 dark:text-slate-400">{state.status}</p>
         </div>
         <ol className="flex items-center gap-2 text-xs">
-          {STAGE_KEYS.map(({ key }) => {
+          {STAGE_KEYS.filter(({ key }) =>
+            // Phase 9.6 — crops mode folds FDI into validate; hide the FDI
+            // pill so the bar reads "Validate ✓ — Embed ✓ — Search ✓".
+            !(state.cropsMode && key === "fdi")
+          ).map(({ key }) => {
             const stage = state[key] as StageState;
             const tone =
               stage === "done"
@@ -62,7 +75,7 @@ export function PipelineProgress({ state }: Props) {
                 : "bg-slate-200 text-slate-500 dark:bg-slate-800 dark:text-slate-400";
             return (
               <li key={key} className={`rounded-full px-3 py-1 font-medium ${tone}`}>
-                {labelFor(key, state.mode)}
+                {labelFor(key, state.mode, !!state.cropsMode)}
                 {key === "embed" && showProgress ? ` ${showProgress}` : ""}
               </li>
             );

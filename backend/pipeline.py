@@ -764,6 +764,185 @@ def compute_query_vector_sync(
     }
 
 
+# Phase 9.6 — OOD heuristic. The FDI classifier's argmax softmax is a cheap
+# proxy for "this looks like a tooth crop." Tooth crops typically score
+# >0.5; non-tooth photos collapse close to uniform over the 32-class
+# distribution (~0.03). A 0.25 cutoff catches obviously-non-tooth uploads
+# without rejecting genuinely-uncertain crops the user might still want to
+# proceed with (e.g. wisdom teeth at conf ~0.3-0.4).
+FDI_OOD_MAX_SOFTMAX = 0.25
+# If more than half the uploaded crops fail the OOD gate, abort the whole
+# identify-crops run with a friendly error — the user almost certainly
+# uploaded the wrong kind of files.
+FDI_OOD_ABORT_FRACTION = 0.5
+
+
+def _is_valid_fdi(label: str | None, fdi_label_inv: dict[int, str]) -> bool:
+    """True when `label` is one of the embedder's known FDI strings."""
+    if label is None:
+        return False
+    return label in fdi_label_inv.values()
+
+
+def compute_query_vector_from_crops(
+    crop_images: list,
+    models: PipelineModels,
+    fdi_overrides: list[str | None] | None = None,
+) -> dict:
+    """Phase 9.6 — Stages C→D→E for pre-cropped tooth uploads.
+
+    Skips YOLO and per-panoramic cropping. Accepts an ordered list of PIL
+    ``Image`` instances (each one a single tooth crop) plus an optional
+    parallel list of user-supplied FDI labels (e.g. "11", "23"). When a
+    slot is None / blank the FDI classifier picks the label and its
+    confidence as in the panoramic path.
+
+    Returns the same shape as ``compute_query_vector_sync`` plus a
+    ``per_crop`` array carrying the input-order metadata (so the frontend
+    grid can show which user-uploaded crop ended up with which FDI / which
+    were dropped as duplicates / which failed the OOD gate).
+
+    Validation gate: if the FDI classifier's max-softmax confidence is below
+    ``FDI_OOD_MAX_SOFTMAX`` for more than half of the uploaded crops, the
+    whole call aborts with a ValueError carrying a user-facing message —
+    cheap defense against "user uploaded a non-tooth photo."
+
+    Calibration: just like the panoramic path, downstream callers MUST
+    treat the returned vector as the canonical mean-pool. The FDI dedup
+    rule is identical (keep highest-confidence per FDI), and the per-crop
+    metadata records both the chosen FDI and a `source` flag (`auto` /
+    `override`) so the UI can attribute decisions back to the user.
+    """
+    if not crop_images:
+        raise ValueError("No crops supplied.")
+    if len(crop_images) > 32:
+        # 32 = FDI label space; more than that and the user is uploading
+        # garbage. The panoramic path tops out at 32 too after dedup.
+        raise ValueError("Too many crops — maximum is 32 tooth crops per query.")
+
+    cfg = models.config
+    device = models.device
+
+    if fdi_overrides is None:
+        fdi_overrides = [None] * len(crop_images)
+    if len(fdi_overrides) != len(crop_images):
+        raise ValueError(
+            f"fdi_overrides length {len(fdi_overrides)} != crops length {len(crop_images)}"
+        )
+
+    # --- Stage C: FDI classification on every crop ---
+    # Always run the classifier so we have a confidence we can display, even
+    # when the user supplied an override (we still want to flag low-conf as
+    # OOD risk in the panel).
+    with torch.no_grad():
+        logits_all = [models.fdi_classifier(_to_tensor(c, cfg.crop_size, device)) for c in crop_images]
+    logits_tensor = torch.cat(logits_all, dim=0)
+    probs = F.softmax(logits_tensor, dim=1).cpu().numpy()
+    auto_class_idx = probs.argmax(axis=1)
+    auto_confidences = probs.max(axis=1)
+    auto_labels = [models.fdi_label_inv[idx] for idx in auto_class_idx]
+
+    # --- Pre-stage: OOD gate ---
+    # A crop "fails" when its auto FDI confidence is below the OOD cutoff
+    # AND the user has NOT overridden it. An override expresses user intent
+    # that we don't second-guess.
+    per_crop_records: list[dict] = []
+    n_failed = 0
+    for i in range(len(crop_images)):
+        override = (fdi_overrides[i] or "").strip() or None
+        if override is not None and not _is_valid_fdi(override, models.fdi_label_inv):
+            raise ValueError(
+                f"crop {i}: '{override}' is not a known FDI label"
+            )
+        chosen = override if override is not None else auto_labels[i]
+        source = "override" if override is not None else "auto"
+        failed_ood = override is None and float(auto_confidences[i]) < FDI_OOD_MAX_SOFTMAX
+        if failed_ood:
+            n_failed += 1
+        per_crop_records.append({
+            "input_index": i,
+            "auto_fdi": auto_labels[i],
+            "auto_fdi_confidence": float(auto_confidences[i]),
+            "chosen_fdi": chosen,
+            "source": source,
+            "failed_ood": failed_ood,
+            "dropped_as_duplicate": False,  # filled in below
+            "kept": False,                  # filled in below
+        })
+
+    if n_failed / len(crop_images) > FDI_OOD_ABORT_FRACTION:
+        raise ValueError(
+            "These do not look like single-tooth X-ray crops "
+            f"({n_failed}/{len(crop_images)} crops failed the OOD heuristic at "
+            f"max-softmax < {FDI_OOD_MAX_SOFTMAX:.2f}). "
+            "Are you uploading photos of a panoramic instead?"
+        )
+
+    # --- Dedup by chosen FDI ---
+    # Reuse the panoramic-path rule: when two crops claim the same FDI,
+    # keep the one whose auto-confidence is higher. Overrides participate
+    # the same way; the user-supplied label is the dedup key, but the
+    # tie-break is still the classifier's per-input confidence.
+    seen: dict[str, int] = {}
+    keep_indices: list[int] = []
+    for i, rec in enumerate(per_crop_records):
+        if rec["failed_ood"]:
+            continue
+        fdi = rec["chosen_fdi"]
+        if fdi in seen and auto_confidences[i] <= auto_confidences[seen[fdi]]:
+            rec["dropped_as_duplicate"] = True
+            continue
+        if fdi in seen:
+            prev = seen[fdi]
+            per_crop_records[prev]["dropped_as_duplicate"] = True
+            per_crop_records[prev]["kept"] = False
+            keep_indices.remove(prev)
+        seen[fdi] = i
+        keep_indices.append(i)
+    keep_indices.sort()
+    for i in keep_indices:
+        per_crop_records[i]["kept"] = True
+
+    if not keep_indices:
+        raise ValueError(
+            "No crops survived FDI assignment — all crops either failed the OOD "
+            "gate or were de-duplicated."
+        )
+
+    fdi_kept = [per_crop_records[i]["chosen_fdi"] for i in keep_indices]
+    fdi_conf_kept = [float(auto_confidences[i]) for i in keep_indices]
+
+    # --- Stage D: Embeddings (single model — crops path mirrors enrolment) ---
+    embeddings = []
+    with torch.no_grad():
+        for i, fdi in zip(keep_indices, fdi_kept):
+            tensor = _to_tensor(crop_images[i], cfg.crop_size, device)
+            if models.embedder_uses_metadata:
+                fdi_idx = models.embedder_fdi_label_map.get(fdi, 0)
+                fdi_t = torch.tensor([fdi_idx], dtype=torch.long, device=device)
+                emb = models.embedder(tensor, fdi_t)
+            else:
+                emb = models.embedder(tensor)
+            embeddings.append(emb.cpu().numpy()[0])
+    embeddings_arr = np.stack(embeddings).astype(np.float32)
+
+    # --- Stage E: mean + L2 ---
+    pooled = embeddings_arr.mean(axis=0)
+    n = float(np.linalg.norm(pooled))
+    query_vec = (pooled / n if n > 1e-12 else pooled).astype(np.float32)
+
+    return {
+        "query_vec": query_vec,
+        "embeddings_arr": embeddings_arr,
+        "fdi_kept": fdi_kept,
+        "fdi_conf_kept": fdi_conf_kept,
+        "n_teeth": int(len(fdi_kept)),
+        "per_crop": per_crop_records,  # input-order, includes dropped + failed
+        "n_failed_ood": n_failed,
+        "n_uploaded": len(crop_images),
+    }
+
+
 async def run_pipeline(
     panoramic_path: Path,
     query_id: str,
@@ -1351,6 +1530,264 @@ async def run_pipeline(
             "age_estimate": age_estimate,
             # Phase 9.5 — query_id so the frontend can hit /api/search-fragment.
             "query_id": query_id,
+        },
+    }
+
+    yield {"event": "done", "data": {}}
+
+
+async def run_crops_pipeline(
+    crop_images: list,
+    query_id: str,
+    models: PipelineModels,
+    fdi_overrides: list[str | None] | None = None,
+    session_id: str | None = None,
+) -> AsyncGenerator[dict, None]:
+    """Phase 9.6 — streaming identify-from-crops.
+
+    Same SSE event shape as ``run_pipeline`` for stages ``validate``,
+    ``embed`` (no per-tooth bbox info since we have no panoramic), and
+    ``search``. The frontend reuses the existing PipelineProgress and
+    ResultsCards components verbatim — the crops path only differs in
+    (a) no panoramic overlay, (b) the validate stage instead of detect/fdi,
+    (c) the `per_tooth` payload carries only `index` + `fdi` + `fdi_confidence`
+    (no bbox), so any consumer that needs bbox should null-guard.
+
+    Calibration semantics are inherited from the panoramic path: open-set,
+    percentile, age, top1_top2_gap, confidence all key off canonical
+    ``sims[0]`` / canonical_top1_pid. Session merge mirrors run_pipeline.
+    """
+    cfg = models.config
+    timings: dict[str, float] = {}
+
+    # --- Stage: validate (OOD gate + FDI assignment + dedup) ---
+    t0 = time.perf_counter()
+    yield {"event": "stage_start", "data": {"stage": "validate", "message": f"Validating {len(crop_images)} crops..."}}
+    await asyncio.sleep(0)
+    try:
+        embed_result = compute_query_vector_from_crops(
+            crop_images, models, fdi_overrides=fdi_overrides
+        )
+    except ValueError as exc:
+        yield {"event": "error", "data": {"message": str(exc)}}
+        return
+    timings["validate"] = (time.perf_counter() - t0) * 1000
+
+    query_vec = embed_result["query_vec"]
+    embeddings_arr = embed_result["embeddings_arr"]
+    fdi_kept = embed_result["fdi_kept"]
+    fdi_conf_kept = embed_result["fdi_conf_kept"]
+    per_crop_records = embed_result["per_crop"]
+
+    yield {
+        "event": "stage_complete",
+        "data": {
+            "stage": "validate",
+            "n_uploaded": embed_result["n_uploaded"],
+            "n_failed_ood": embed_result["n_failed_ood"],
+            "n_kept": len(fdi_kept),
+            "n_dropped_duplicates": sum(1 for r in per_crop_records if r["dropped_as_duplicate"]),
+            "per_crop": per_crop_records,
+            "elapsed_ms": round(timings["validate"], 1),
+        },
+    }
+    await _dwell(timings["validate"], cfg.min_stage_dwell_ms)
+
+    # --- Cache per-tooth embeddings so the fragment explorer still works ---
+    query_dir = cfg.temp_dir / query_id
+    query_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        np.savez(
+            query_dir / "teeth.npz",
+            embeddings=embeddings_arr,
+            fdi=np.array(fdi_kept, dtype=object),
+            fdi_conf=np.array(fdi_conf_kept, dtype=np.float32),
+            # Synthetic bboxes (zeros) — the fragment explorer doesn't use them
+            # for crops-mode queries, but the schema is shared with the
+            # panoramic path's teeth.npz.
+            bboxes=np.zeros((len(fdi_kept), 4), dtype=np.float32),
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[pipeline] WARN: failed to cache crops teeth.npz for {query_id}: {exc}")
+
+    # Crops mode folds embedding into the validate stage, but the UI still
+    # tracks an `embed` pill. Flash a stage_start so it briefly lights amber
+    # rather than going idle→done with no active state.
+    yield {
+        "event": "stage_start",
+        "data": {
+            "stage": "embed",
+            "message": "Embeddings already computed during validate.",
+            "total": int(len(embeddings_arr)),
+        },
+    }
+    await asyncio.sleep(0)
+
+    yield {
+        "event": "stage_complete",
+        "data": {
+            "stage": "embed",
+            "n_embeddings": int(len(embeddings_arr)),
+            "elapsed_ms": round(timings["validate"], 1),  # embed is folded into validate above
+            "ensemble": False,
+            "ensemble_members": None,
+            "per_tooth": [
+                {
+                    "index": i,
+                    "fdi": fdi_kept[i],
+                    "fdi_confidence": fdi_conf_kept[i],
+                    # No bbox — crops mode has no panoramic. Frontend bbox
+                    # consumers (FragmentSelector hover overlay) must
+                    # null-guard.
+                    "bbox": None,
+                }
+                for i in range(len(fdi_kept))
+            ],
+            "query_id": query_id,
+        },
+    }
+
+    # --- FAISS search (+ session merge) — mirrors run_pipeline ---
+    t0 = time.perf_counter()
+    n_candidates = len(models.registry_index)
+    yield {"event": "stage_start", "data": {"stage": "search", "message": f"Searching {n_candidates} candidates..."}}
+    await asyncio.sleep(0.4)
+
+    sims, neighbor_ids = models.registry_index.search(query_vec, k=cfg.top_k)
+    timings["search"] = (time.perf_counter() - t0) * 1000
+
+    # --- Session merge (Phase 9.7) ---
+    session_results: list[dict] = []
+    if session_id is not None:
+        try:
+            from backend import sessions as session_store
+            session_index = session_store.load_session_index(
+                cfg.sessions_dir, session_id, dim=query_vec.shape[0]
+            )
+            if session_index is not None and len(session_index) > 0:
+                session_meta = session_store.load_session_meta(
+                    cfg.sessions_dir, session_id
+                ) or {}
+                meta_by_pid = {p["person_id"]: p for p in session_meta.get("persons", [])}
+                k_session = min(cfg.top_k, len(session_index))
+                ssims, sids = session_index.search(query_vec, k=k_session)
+                for sim, sid in zip(ssims, sids):
+                    m = meta_by_pid.get(sid, {})
+                    session_results.append({
+                        "person_id": sid,
+                        "fake_name": m.get("fake_name", sid),
+                        "n_teeth": int(m.get("n_teeth", 0)) or None,
+                        "similarity": float(sim),
+                        "is_session": True,
+                    })
+        except Exception as exc:  # noqa: BLE001
+            print(f"[pipeline] crops session merge failed (session_id={session_id}): {exc}")
+
+    canonical_results = []
+    for sim, person_id in zip(sims, neighbor_ids):
+        meta = models.registry_meta.get(person_id, {})
+        canonical_results.append({
+            "person_id": person_id,
+            "fake_name": meta.get("fake_name", person_id),
+            "n_teeth": meta.get("n_teeth"),
+            "similarity": float(sim),
+            "is_session": False,
+        })
+
+    merged = sorted(
+        canonical_results + session_results,
+        key=lambda r: r["similarity"],
+        reverse=True,
+    )[: cfg.top_k]
+    results_list = [{"rank": i + 1, **r} for i, r in enumerate(merged)]
+
+    # Calibration — canonical-only, exactly as run_pipeline.
+    canonical_top1 = float(sims[0])
+    canonical_top2 = float(sims[1]) if len(sims) > 1 else 0.0
+    top1_top2_gap = canonical_top1 - canonical_top2 if len(sims) > 1 else 1.0
+    confidence = _confidence_label(canonical_top1, canonical_top2)
+
+    open_set_score, open_set_decision = _open_set_score(
+        canonical_top1, models.open_set_calibration
+    )
+    # No provenance hash for crops mode — there's no single panoramic file
+    # to SHA-256 against the canonical hash index.
+    query_provenance, expected_pid = "unknown", None
+
+    age_estimate = _estimate_age(
+        age_head=models.age_head,
+        device=models.device,
+        query_vec=query_vec,
+        pool_size=int(len(embeddings_arr)),
+        open_set_decision=open_set_decision,
+    )
+
+    sim_top1_pct = _sim_top1_percentile(canonical_top1, models.sim_top1_in_registry_sorted)
+    canonical_top1_pid = str(neighbor_ids[0]) if len(neighbor_ids) > 0 else None
+    for r in results_list:
+        if (
+            not r.get("is_session")
+            and r["person_id"] == canonical_top1_pid
+        ):
+            r["similarity_percentile"] = _sim_top1_percentile(
+                r["similarity"], models.sim_top1_in_registry_sorted
+            )
+        else:
+            r["similarity_percentile"] = None
+
+    # Tooth contributions against the displayed top-1 (canonical or session).
+    tooth_contributions: list[dict] = []
+    try:
+        top1_person = results_list[0]["person_id"]
+        if results_list[0].get("is_session") and session_id is not None:
+            from backend import sessions as session_store
+            sidx = session_store.load_session_index(
+                cfg.sessions_dir, session_id, dim=query_vec.shape[0]
+            )
+            top1_faiss_idx = sidx.person_ids.index(top1_person)
+            top1_vec = sidx.index.reconstruct(top1_faiss_idx)
+        else:
+            top1_faiss_idx = models.registry_index.person_ids.index(top1_person)
+            top1_vec = models.registry_index.index.reconstruct(top1_faiss_idx)
+        per_tooth_sims = embeddings_arr @ top1_vec
+        for i, fdi in enumerate(fdi_kept):
+            tooth_contributions.append({
+                "fdi": fdi,
+                "fdi_confidence": fdi_conf_kept[i],
+                "similarity_to_top1": float(per_tooth_sims[i]),
+            })
+        tooth_contributions.sort(key=lambda c: c["similarity_to_top1"], reverse=True)
+    except Exception:
+        tooth_contributions = []
+
+    timings["total"] = sum(timings.values())
+
+    yield {
+        "event": "stage_complete",
+        "data": {
+            "stage": "search",
+            "results": results_list,
+            "confidence": confidence,
+            "top1_top2_gap": top1_top2_gap,
+            "timings_ms": {k: round(v, 1) for k, v in timings.items()},
+            "n_query_teeth": int(len(embeddings_arr)),
+            "n_dropped": sum(1 for r in per_crop_records if r["dropped_as_duplicate"]),
+            "tooth_contributions": tooth_contributions,
+            "ensemble": False,
+            "ensemble_members": None,
+            "open_set_score": open_set_score,
+            "open_set_decision": open_set_decision,
+            "open_set_threshold": (
+                models.open_set_calibration["operating_point"]["threshold"]
+                if models.open_set_calibration else None
+            ),
+            "query_provenance": query_provenance,
+            "expected_person_id": expected_pid,
+            "sim_top1_percentile": sim_top1_pct,
+            "age_estimate": age_estimate,
+            "query_id": query_id,
+            # Phase 9.6 marker — UI flips the results-header copy on this.
+            "crops_mode": True,
         },
     }
 

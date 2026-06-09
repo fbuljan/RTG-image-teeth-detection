@@ -7,13 +7,16 @@ import { ModelCard } from "@/components/ModelCard";
 import { PipelineProgress, type PipelineState } from "@/components/PipelineProgress";
 import { RegistryList, type RegistryListHandle } from "@/components/RegistryList";
 import { AboutDemo } from "@/components/AboutDemo";
+import { CropsUploadZone } from "@/components/CropsUploadZone";
 import { EnrolModal } from "@/components/EnrolModal";
 import { SessionEnrolments } from "@/components/SessionEnrolments";
 import { ResultsCards, type ResultsState } from "@/components/ResultsCards";
 import { useToasts } from "@/components/Toaster";
 import { UploadZone } from "@/components/UploadZone";
 import { getOrMintSessionId, type RegistryPerson, type StageEvent } from "@/lib/api";
-import { streamIdentify, type PipelineMode } from "@/lib/identify";
+import { streamIdentify, streamIdentifyCrops, type PipelineMode } from "@/lib/identify";
+
+type InputMode = "panoramic" | "crops";
 
 const DEFAULT_MODE: PipelineMode = "segmentation";
 
@@ -34,6 +37,10 @@ export default function Page() {
   const [mode, setMode] = useState<PipelineMode>(DEFAULT_MODE);
   const [pipeline, setPipeline] = useState<PipelineState>(INITIAL_PIPELINE);
   const [results, setResults] = useState<ResultsState | null>(null);
+  // Phase 9.6 — input mode switch. "panoramic" routes to /api/identify,
+  // "crops" routes to /api/identify-crops. Toggling clears any in-flight
+  // results so the user doesn't see stale state from the other path.
+  const [inputMode, setInputMode] = useState<InputMode>("panoramic");
   // Phase 9.5 — per-tooth metadata captured during embed-stage, consumed when search completes.
   const perToothRef = useRef<import("@/lib/api").PerTooth[]>([]);
   const registryRef = useRef<RegistryListHandle | null>(null);
@@ -156,6 +163,62 @@ export default function Page() {
     [onIdentify],
   );
 
+  // Phase 9.6 — identify-from-crops. Same SSE-driven flow as onIdentify but
+  // the first stage is `validate` (OOD gate + FDI assignment + dedup), no
+  // panoramic preview, and no detect/fdi stages. Results render via the
+  // standard ResultsCards with `crops_mode=true` flipping the header copy.
+  const onIdentifyCrops = useCallback(
+    async (files: File[], fdiOverrides: (string | null)[]) => {
+      setBusy(true);
+      setResults(null);
+      setPipeline({
+        ...INITIAL_PIPELINE,
+        status: `Validating ${files.length} crops…`,
+        currentImageUrl: null,  // no panoramic in crops mode
+        mode,
+        cropsMode: true,
+      });
+      requestAnimationFrame(() => {
+        pipelineRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+
+      try {
+        perToothRef.current = [];
+        for await (const evt of streamIdentifyCrops(files, {
+          fdiOverrides,
+          sessionId: sessionId ?? undefined,
+        })) {
+          if (
+            evt.event === "stage_complete"
+            && evt.data.stage === "embed"
+            && Array.isArray(evt.data.per_tooth)
+          ) {
+            perToothRef.current = evt.data.per_tooth;
+          }
+          applyEvent(evt, setPipeline, setResults, selected, perToothRef.current);
+          if (evt.event === "warning") {
+            toasts.push({ level: "warning", title: "Pipeline warning", message: evt.data.message });
+          }
+          if (evt.event === "error") {
+            toasts.push({ level: "error", title: "Pipeline error", message: evt.data.message });
+          }
+          if (evt.event === "stage_complete" && evt.data.stage === "search") {
+            requestAnimationFrame(() => {
+              resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+            });
+          }
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setPipeline((prev) => ({ ...prev, error: msg, status: "Pipeline failed" }));
+        toasts.push({ level: "error", title: "Crops pipeline failed", message: msg });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [selected, toasts, mode, sessionId],
+  );
+
   return (
     <main className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-10 sm:px-6">
       <header className="space-y-2">
@@ -215,12 +278,43 @@ export default function Page() {
         />
       )}
 
-      <UploadZone
-        busy={busy}
-        onIdentify={onIdentify}
-        mode={mode}
-        onModeChange={setMode}
-      />
+      {/* Phase 9.6 — input-mode tab strip. Switching wipes any in-flight
+          results so the user doesn't see panoramic state under a "Matched
+          from N crops" header. */}
+      <div className="flex flex-wrap items-center gap-1 rounded-full border border-slate-200 bg-slate-100 p-0.5 text-xs dark:border-slate-700 dark:bg-slate-800 self-start">
+        {(["panoramic", "crops"] as InputMode[]).map((tab) => {
+          const active = inputMode === tab;
+          return (
+            <button
+              key={tab}
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setInputMode(tab);
+                clearResults();
+              }}
+              className={`rounded-full px-3 py-1 font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                active
+                  ? "bg-white text-slate-900 shadow dark:bg-slate-950 dark:text-slate-100"
+                  : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100"
+              }`}
+            >
+              {tab === "panoramic" ? "Panoramic X-ray" : "Tooth crops"}
+            </button>
+          );
+        })}
+      </div>
+
+      {inputMode === "panoramic" ? (
+        <UploadZone
+          busy={busy}
+          onIdentify={onIdentify}
+          mode={mode}
+          onModeChange={setMode}
+        />
+      ) : (
+        <CropsUploadZone busy={busy} onIdentifyCrops={onIdentifyCrops} />
+      )}
 
       {(busy || pipeline.currentImageUrl || pipeline.error) && (
         <div ref={pipelineRef} className="scroll-mt-4">
@@ -286,8 +380,9 @@ export default function Page() {
 }
 
 function mapStage(name: string): keyof PipelineState | null {
-  // Backend emits "detect" or "segment" for the first stage depending on mode.
-  if (name === "detect" || name === "segment") return "stageA";
+  // Backend emits "detect" / "segment" for panoramic mode and "validate"
+  // for crops mode — all three occupy the same first-stage slot in the UI.
+  if (name === "detect" || name === "segment" || name === "validate") return "stageA";
   if (name === "fdi" || name === "embed" || name === "search") return name;
   return null;
 }
@@ -358,6 +453,9 @@ function applyEvent(
           // Phase 9.5 — fragment-search support.
           queryId: evt.data.query_id ?? null,
           perTooth: perTooth ?? [],
+          // Phase 9.6 — backend sets crops_mode=true on the search event for
+          // /api/identify-crops; the results header flips its copy.
+          cropsMode: evt.data.crops_mode ?? false,
         });
         setPipeline((prev) => ({ ...prev, status: "Done." }));
       }

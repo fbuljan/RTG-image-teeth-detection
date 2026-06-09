@@ -58,6 +58,58 @@ export async function* streamIdentify(
   }
 }
 
+// Phase 9.6 — pre-cropped tooth upload. Multipart files[] with optional
+// fdi_overrides_json string. Same SSE shape as /api/identify but with a
+// `validate` stage in place of `detect`/`fdi` and no panoramic-image
+// overlays.
+export async function* streamIdentifyCrops(
+  files: File[],
+  options: {
+    fdiOverrides?: (string | null)[];
+    sessionId?: string;
+    signal?: AbortSignal;
+  } = {},
+): AsyncGenerator<StageEvent> {
+  if (files.length === 0) throw new Error("No crops supplied");
+
+  const form = new FormData();
+  for (const f of files) form.append("files", f);
+  if (options.fdiOverrides) {
+    form.append("fdi_overrides_json", JSON.stringify(options.fdiOverrides));
+  }
+
+  const headers: Record<string, string> = {};
+  if (options.sessionId) headers["X-Session-Id"] = options.sessionId;
+
+  const res = await fetch(`${API_BASE}/api/identify-crops`, {
+    method: "POST",
+    body: form,
+    headers,
+    signal: options.signal,
+  });
+  if (!res.ok || !res.body) {
+    const txt = await res.text().catch(() => res.statusText);
+    throw new Error(`Crops pipeline request failed: ${res.status} ${txt}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    let idx;
+    while ((idx = buffer.indexOf("\n\n")) !== -1) {
+      const chunk = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      const parsed = parseSse(chunk);
+      if (parsed) yield parsed as StageEvent;
+    }
+  }
+}
+
+
 function parseSse(chunk: string): StageEvent | null {
   let event = "";
   const dataLines: string[] = [];
