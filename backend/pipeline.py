@@ -16,6 +16,7 @@ suitable for streaming to the frontend over SSE.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -108,6 +109,9 @@ class PipelineModels:
     embedder_fdi_label_map: dict[str, int] = field(default_factory=dict)
     registry_index: RetrievalIndex | None = None
     registry_meta: dict[str, dict] = field(default_factory=dict)
+    # Phase 9.2 — Phase 8.6 open-set calibration (locked) + provenance hash index.
+    open_set_calibration: dict | None = None
+    panoramic_sha256_to_pid: dict[str, str] = field(default_factory=dict)
     # Ensemble: parallel arrays of
     # (name, model, uses_metadata, fdi_label_map, crop_mode)
     ensemble_models: list[tuple[str, torch.nn.Module, bool, dict[str, int], str]] = field(
@@ -162,6 +166,37 @@ class PipelineModels:
             payload = json.load(f)
         self.registry_meta = {p["person_id"]: p for p in payload["persons"]}
         print(f"[pipeline] registry size: {len(self.registry_index)} persons")
+
+        # 4b. Phase 8.6 open-set calibration — load the locked threshold + z-score
+        # stats so the pipeline can emit a calibrated open-set decision per query.
+        calib_path = PROJECT_ROOT / "identification/runs/phase8_open_set/phase8_open_set_calibration.json"
+        if calib_path.exists():
+            with open(calib_path) as f:
+                self.open_set_calibration = json.load(f)
+            thr = self.open_set_calibration["operating_point"]["threshold"]
+            print(f"[pipeline] open-set calibration loaded (threshold z = {thr:.4f}, mode = {self.open_set_calibration['mode']})")
+        else:
+            print(f"[pipeline] WARN: open-set calibration not found at {calib_path}; open_set_decision will be 'unknown'")
+
+        # 4c. Phase 9.2 provenance — precompute SHA-256 of every registry
+        # panoramic so we can flag self-match queries (re-uploads of an enrolled
+        # image) vs novel uploads in the API response.
+        self.panoramic_sha256_to_pid = {}
+        n_hashed = 0
+        for pid, meta in self.registry_meta.items():
+            rel_path = meta.get("panoramic_path")
+            if not rel_path:
+                continue
+            full = PROJECT_ROOT / rel_path
+            if not full.exists():
+                continue
+            try:
+                h = hashlib.sha256(full.read_bytes()).hexdigest()
+                self.panoramic_sha256_to_pid[h] = pid
+                n_hashed += 1
+            except OSError:
+                continue
+        print(f"[pipeline] provenance hash index: {n_hashed}/{len(self.registry_meta)} panoramics hashed")
 
         # 5. Ensemble — load every other embedder + its registry so the user
         # can flip between single-model and ensemble per query. If the YOLO-
@@ -261,6 +296,55 @@ def _confidence_label(top1: float, top2: float) -> str:
     if gap >= 0.001:   # middle 50%
         return "medium"
     return "uncertain"  # bottom quartile — truly indistinguishable
+
+
+def _open_set_score(top1_sim: float, calibration: dict | None) -> tuple[float | None, str]:
+    """Phase 8.6 locked open-set scoring.
+
+    Returns (z_scored_sim_top1, decision) where decision is one of:
+        "in_registry"  — score >= threshold (probably enrolled)
+        "rejected"     — score <  threshold (probably not enrolled)
+        "unknown"      — calibration not loaded (fail-open: never rejects)
+
+    The locked calibration's `mode` is `sim_top1_only` with weights `[1, 0, 0, 0, 0]`
+    over z-scored features. The fallback rule fired during Phase 8.6 because
+    the 5-feature LR did not lift AUROC by >= 0.030 over sim-only on val.
+    """
+    if not calibration:
+        return None, "unknown"
+    mu = calibration["zscore_mu"][0]
+    sd = calibration["zscore_sd"][0]
+    z = (top1_sim - mu) / sd if sd > 0 else 0.0
+    weight = calibration["weights"][0]
+    bias = calibration.get("bias", 0.0)
+    score = weight * z + bias
+    threshold = calibration["operating_point"]["threshold"]
+    decision = "in_registry" if score >= threshold else "rejected"
+    return float(score), decision
+
+
+def _query_provenance(upload_path: Path, sha256_to_pid: dict[str, str]) -> tuple[str, str | None]:
+    """Phase 9.2 — classify whether the uploaded query is a known registry image.
+
+    Returns (provenance, expected_person_id) where provenance is one of:
+        "self_match" — bytes match an enrolled panoramic; expected_person_id is set
+        "novel"      — bytes do not match any enrolled panoramic
+        "unknown"    — could not read the upload (filesystem error)
+
+    Note that "self_match" means the *image* matches an enrolled image — the
+    deployed dataset only has one panoramic per person, so this is also the
+    "self" person. The "heldout" category (different image of an enrolled
+    person) is structurally impossible on this dataset but reserved for the
+    Phase 9.8 curated-OOS picks.
+    """
+    try:
+        h = hashlib.sha256(upload_path.read_bytes()).hexdigest()
+    except OSError:
+        return "unknown", None
+    pid = sha256_to_pid.get(h)
+    if pid is None:
+        return "novel", None
+    return "self_match", pid
 
 
 async def run_pipeline(
@@ -655,6 +739,14 @@ async def run_pipeline(
     top1_top2_gap = float(sims[0] - sims[1]) if len(sims) > 1 else 1.0
     confidence = _confidence_label(float(sims[0]), float(sims[1]) if len(sims) > 1 else 0.0)
 
+    # Phase 9.2 — Phase 8.6 calibrated open-set decision + provenance.
+    open_set_score, open_set_decision = _open_set_score(
+        float(sims[0]), models.open_set_calibration,
+    )
+    query_provenance, expected_pid = _query_provenance(
+        panoramic_path, models.panoramic_sha256_to_pid,
+    )
+
     # Per-tooth contribution: dot each tooth's embedding against the top-1
     # gallery profile. In ensemble mode we average the per-model contributions.
     tooth_contributions: list[dict] = []
@@ -696,6 +788,15 @@ async def run_pipeline(
             "tooth_contributions": tooth_contributions,
             "ensemble": ensemble,
             "ensemble_members": [m[0] for m in models.ensemble_models] if ensemble else None,
+            # Phase 9.2 — calibrated open-set + provenance (consumed by Phase 9.3 UI).
+            "open_set_score": open_set_score,
+            "open_set_decision": open_set_decision,
+            "open_set_threshold": (
+                models.open_set_calibration["operating_point"]["threshold"]
+                if models.open_set_calibration else None
+            ),
+            "query_provenance": query_provenance,
+            "expected_person_id": expected_pid,
         },
     }
 
