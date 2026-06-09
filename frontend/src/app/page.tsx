@@ -31,6 +31,8 @@ export default function Page() {
   const [mode, setMode] = useState<PipelineMode>(DEFAULT_MODE);
   const [pipeline, setPipeline] = useState<PipelineState>(INITIAL_PIPELINE);
   const [results, setResults] = useState<ResultsState | null>(null);
+  // Phase 9.5 — per-tooth metadata captured during embed-stage, consumed when search completes.
+  const perToothRef = useRef<import("@/lib/api").PerTooth[]>([]);
   const registryRef = useRef<RegistryListHandle | null>(null);
   const pipelineRef = useRef<HTMLDivElement | null>(null);
   const resultsRef = useRef<HTMLDivElement | null>(null);
@@ -68,8 +70,18 @@ export default function Page() {
       });
 
       try {
+        // Reset the per-tooth cache for this new query (Phase 9.5).
+        perToothRef.current = [];
         for await (const evt of streamIdentify(file, { mode })) {
-          applyEvent(evt, setPipeline, setResults, selected);
+          // Phase 9.5 — capture per-tooth metadata from embed stage for fragment-search.
+          if (
+            evt.event === "stage_complete"
+            && evt.data.stage === "embed"
+            && Array.isArray((evt.data as Record<string, unknown>).per_tooth)
+          ) {
+            perToothRef.current = (evt.data as Record<string, unknown>).per_tooth as import("@/lib/api").PerTooth[];
+          }
+          applyEvent(evt, setPipeline, setResults, selected, perToothRef.current);
           if (evt.event === "warning") {
             toasts.push({
               level: "warning",
@@ -164,6 +176,27 @@ export default function Page() {
               selectedFakeName: selected?.fake_name,
             }}
             onReset={tryAnother}
+            onFragmentResult={(r) => {
+              // Phase 9.5 — merge fragment-search payload into the existing
+              // ResultsState so the verdict/calibration/list all re-render.
+              setResults((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      results: r.results ?? prev.results,
+                      confidence: r.confidence ?? prev.confidence,
+                      topGap: r.top1_top2_gap ?? prev.topGap,
+                      nQueryTeeth: r.n_query_teeth ?? prev.nQueryTeeth,
+                      openSetScore: r.open_set_score ?? null,
+                      openSetDecision: r.open_set_decision ?? "unknown",
+                      openSetThreshold: r.open_set_threshold ?? null,
+                      simTop1Percentile: r.sim_top1_percentile ?? null,
+                      ageEstimate: r.age_estimate ?? prev.ageEstimate,
+                      // Keep queryId, perTooth, provenance, expectedPersonId from the original run.
+                    }
+                  : prev,
+              );
+            }}
           />
         </div>
       )}
@@ -185,6 +218,7 @@ function applyEvent(
   setPipeline: React.Dispatch<React.SetStateAction<PipelineState>>,
   setResults: React.Dispatch<React.SetStateAction<ResultsState | null>>,
   selected?: RegistryPerson,
+  perTooth?: import("@/lib/api").PerTooth[],
 ) {
   switch (evt.event) {
     case "stage_start": {
@@ -242,6 +276,9 @@ function applyEvent(
           expectedPersonId: evt.data.expected_person_id ?? null,
           simTop1Percentile: evt.data.sim_top1_percentile ?? null,
           ageEstimate: evt.data.age_estimate ?? null,
+          // Phase 9.5 — fragment-search support.
+          queryId: (evt.data as Record<string, unknown>).query_id as string ?? null,
+          perTooth: perTooth ?? [],
         });
         setPipeline((prev) => ({ ...prev, status: "Done." }));
       }

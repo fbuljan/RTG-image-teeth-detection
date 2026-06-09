@@ -80,6 +80,37 @@ export type AgeEstimate = {
   in_dense_bucket: boolean;
 };
 
+// Phase 9.5 — per-tooth metadata emitted by the embed stage so the frontend
+// can let the user pick a subset for re-search.
+export type PerTooth = {
+  index: number;
+  fdi: string;
+  fdi_confidence: number;
+  bbox: [number, number, number, number];
+};
+
+// Phase 9.5 — POST /api/search-fragment payload shape (mirrors search-stage data).
+export type FragmentSearchResponse = StageCompleteData & {
+  query_id: string;
+  tooth_indices: number[];
+};
+
+export async function searchFragment(
+  queryId: string,
+  toothIndices: number[],
+): Promise<FragmentSearchResponse> {
+  const res = await fetch(`${API_BASE}/api/search-fragment`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query_id: queryId, tooth_indices: toothIndices }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(`Fragment search failed: ${res.status} ${text}`);
+  }
+  return res.json();
+}
+
 export async function fetchRegistry(): Promise<RegistryListResponse> {
   const res = await fetch(`${API_BASE}/api/registry`, { cache: "no-store" });
   if (!res.ok) throw new Error(`Failed to fetch registry: ${res.status}`);

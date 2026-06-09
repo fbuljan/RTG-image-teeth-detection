@@ -1,13 +1,16 @@
 "use client";
 
+import { useState } from "react";
 import { InfoHint } from "@/components/InfoHint";
 import type {
   AgeEstimate,
   OpenSetDecision,
+  PerTooth,
   QueryProvenance,
   SearchResult,
   ToothContribution,
 } from "@/lib/api";
+import { searchFragment } from "@/lib/api";
 
 export type ResultsState = {
   results: SearchResult[];
@@ -28,12 +31,127 @@ export type ResultsState = {
   simTop1Percentile: number | null;
   // Phase 9.4 — Phase 8.10 age estimate (sex NOT wired; failed Pass).
   ageEstimate: AgeEstimate | null;
+  // Phase 9.5 — fragment-search support.
+  queryId: string | null;
+  perTooth: PerTooth[];
 };
 
 type Props = {
   state: ResultsState;
   onReset: () => void;
+  onFragmentResult?: (result: import("@/lib/api").FragmentSearchResponse) => void;
 };
+
+// Phase 5 priors (pre-registered): R1 vs gallery as a function of n_query.
+// Used by the FragmentSelector to display "expected outcome at this N" so a
+// rank-1 miss reads as a confirmed data point not a credibility loss.
+const FRAGMENT_PRIORS: Record<number, { r1: number; r5: number }> = {
+  1: { r1: 0.029, r5: 0.083 },
+  2: { r1: 0.088, r5: 0.183 },
+  4: { r1: 0.209, r5: 0.346 },
+  8: { r1: 0.446, r5: 0.617 },
+  16: { r1: 0.826, r5: 0.898 },
+};
+
+function deterministicSample<T>(items: T[], n: number, seed: number): number[] {
+  // Mulberry32 PRNG so shuffles are reproducible per (seed, n).
+  let s = seed >>> 0;
+  const rand = () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const idx = items.map((_, i) => i);
+  for (let i = idx.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [idx[i], idx[j]] = [idx[j], idx[i]];
+  }
+  return idx.slice(0, n);
+}
+
+function FragmentSelector({
+  state,
+  onFragmentResult,
+}: {
+  state: ResultsState;
+  onFragmentResult?: (result: import("@/lib/api").FragmentSearchResponse) => void;
+}) {
+  const [shuffleSeed, setShuffleSeed] = useState(1);
+  const [activeN, setActiveN] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const total = state.perTooth.length;
+  if (total === 0 || !state.queryId) return null;
+
+  const sizes = [1, 2, 4, 8, 16, total].filter((n, i, arr) => n <= total && arr.indexOf(n) === i);
+
+  async function runAt(n: number) {
+    if (!state.queryId) return;
+    setBusy(true);
+    setActiveN(n);
+    try {
+      const indices = deterministicSample(state.perTooth, n, shuffleSeed);
+      const result = await searchFragment(state.queryId, indices);
+      onFragmentResult?.(result);
+    } catch (e) {
+      console.error("fragment search failed", e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 dark:border-slate-700 dark:bg-slate-800/40">
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span className="font-semibold text-slate-700 dark:text-slate-200">Fragment size:</span>
+        {sizes.map((n) => {
+          const prior = FRAGMENT_PRIORS[n];
+          const isAmber = n <= 4;
+          const isActive = activeN === n;
+          return (
+            <button
+              key={n}
+              type="button"
+              disabled={busy}
+              onClick={() => runAt(n)}
+              className={`rounded-md px-2.5 py-1 text-xs font-medium ring-1 ring-inset transition disabled:opacity-50 ${
+                isActive
+                  ? "bg-sky-500 text-white ring-sky-500"
+                  : isAmber
+                  ? "bg-amber-500/10 text-amber-700 ring-amber-500/30 hover:bg-amber-500/20 dark:text-amber-300"
+                  : "bg-emerald-500/10 text-emerald-700 ring-emerald-500/30 hover:bg-emerald-500/20 dark:text-emerald-300"
+              }`}
+              title={
+                prior
+                  ? `Phase 5 prior at N=${n}: R1 = ${(prior.r1 * 100).toFixed(0)}%, R5 = ${(prior.r5 * 100).toFixed(0)}%`
+                  : `Use all ${n} detected teeth`
+              }
+            >
+              {n === total ? `All (${n})` : n}
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          disabled={busy || activeN === null}
+          onClick={() => {
+            setShuffleSeed((s) => s + 1);
+            if (activeN !== null) runAt(activeN);
+          }}
+          className="ml-2 rounded-md border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-white disabled:opacity-50 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-700"
+        >
+          Shuffle
+        </button>
+        <InfoHint
+          text={
+            "Re-run the search with a random subset of N teeth from this query. Phase 5 priors (full-registry R1): N=1 ≈ 3%, N=2 ≈ 9%, N=4 ≈ 21%, N=8 ≈ 45%, N=16 ≈ 83%. A wrong rank-1 at small N is expected, not a failure — it shows the system's honest operating regime when only a fragment is available."
+          }
+        />
+      </div>
+    </div>
+  );
+}
 
 // ---------- Phase 9.3 — Verdict (3-state, replaces 4-tier confidence) ----------
 
@@ -177,7 +295,7 @@ const AGE_HINT_SATURATED =
 
 // ---------- ResultsCards ----------
 
-export function ResultsCards({ state, onReset }: Props) {
+export function ResultsCards({ state, onReset, onFragmentResult }: Props) {
   const verdictKey = classifyVerdict(state);
   const verdict = VERDICT_COPY[verdictKey];
   const provenance = PROVENANCE_COPY[state.queryProvenance];
@@ -262,6 +380,9 @@ export function ResultsCards({ state, onReset }: Props) {
 
         {/* Verdict note */}
         <p className="text-sm italic text-slate-500 dark:text-slate-400">{verdict.note}</p>
+
+        {/* Phase 9.5 — partial-fragment explorer */}
+        <FragmentSelector state={state} onFragmentResult={onFragmentResult} />
 
         {/* Ground-truth row (neutral slate, never green/red) — only when we know
             the expected PID from the provenance hash. */}

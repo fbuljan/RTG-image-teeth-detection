@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
 
-from backend.pipeline import PipelineConfig, PipelineModels, cleanup_temp_dir, run_pipeline
+from backend.pipeline import PipelineConfig, PipelineModels, cleanup_temp_dir, run_fragment_search, run_pipeline
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -305,3 +305,30 @@ async def identify(
             }
 
     return EventSourceResponse(event_stream())
+
+
+# Phase 9.5 — fragment re-search: re-pool a subset of cached tooth embeddings
+# without re-running detection/embedding. Sub-100ms response.
+
+from pydantic import BaseModel  # noqa: E402
+
+
+class FragmentSearchRequest(BaseModel):
+    query_id: str
+    tooth_indices: list[int]
+
+
+@app.post("/api/search-fragment")
+def search_fragment(req: FragmentSearchRequest) -> dict:
+    """Re-search the registry using a subset of the previous query's teeth."""
+    try:
+        return run_fragment_search(
+            query_id=req.query_id,
+            tooth_indices=req.tooth_indices,
+            models=models,
+            config=config,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

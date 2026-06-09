@@ -385,6 +385,142 @@ def _sim_top1_percentile(
     return float(idx) / float(len(sorted_arr))
 
 
+def _build_search_payload(
+    query_vec: np.ndarray,
+    fdi_used: list[str],
+    fdi_conf_used: list[float],
+    models: PipelineModels,
+    config: PipelineConfig,
+    panoramic_path: Path | None,
+) -> dict:
+    """Phase 9.5 — shared search-stage payload builder for /api/identify and
+    /api/search-fragment. Takes a pooled+L2-normalised query vector and returns
+    the same JSON shape the SSE search event emits.
+    """
+    sims, neighbor_ids = models.registry_index.search(query_vec, k=config.top_k)
+    results_list = []
+    for rank, (sim, person_id) in enumerate(zip(sims, neighbor_ids)):
+        meta = models.registry_meta.get(person_id, {})
+        results_list.append({
+            "rank": rank + 1,
+            "person_id": person_id,
+            "fake_name": meta.get("fake_name", person_id),
+            "n_teeth": meta.get("n_teeth"),
+            "similarity": float(sim),
+        })
+
+    top1 = float(sims[0])
+    top2 = float(sims[1]) if len(sims) > 1 else 0.0
+    top1_top2_gap = top1 - top2 if len(sims) > 1 else 1.0
+
+    open_set_score, open_set_decision = _open_set_score(top1, models.open_set_calibration)
+    sim_top1_pct = _sim_top1_percentile(top1, models.sim_top1_in_registry_sorted)
+    for r in results_list:
+        r["similarity_percentile"] = _sim_top1_percentile(
+            r["similarity"], models.sim_top1_in_registry_sorted,
+        )
+
+    # Provenance only makes sense when we have a panoramic_path (full /identify run).
+    if panoramic_path is not None:
+        query_provenance, expected_pid = _query_provenance(panoramic_path, models.panoramic_sha256_to_pid)
+    else:
+        query_provenance, expected_pid = "unknown", None
+
+    # Per-tooth contribution to top-1 (only for the teeth we *did* use).
+    tooth_contributions: list[dict] = []
+    # (Caller supplies embeddings for contribution computation if desired.)
+
+    # Age estimate runs on the same pooled query vector.
+    age_estimate: dict | None = None
+    if models.age_head is not None:
+        try:
+            with torch.no_grad():
+                q = torch.from_numpy(query_vec).unsqueeze(0).to(models.device)
+                pred = float(models.age_head(q).squeeze().item())
+            in_dense = 6.0 <= pred < 13.0
+            ci_half = 2.0 if in_dense else 3.0
+            age_estimate = {
+                "value": pred,
+                "ci_low": pred - ci_half,
+                "ci_high": pred + ci_half,
+                "in_dense_bucket": in_dense,
+            }
+        except Exception:
+            age_estimate = None
+
+    return {
+        "stage": "search",
+        "results": results_list,
+        "confidence": _confidence_label(top1, top2),
+        "top1_top2_gap": top1_top2_gap,
+        "timings_ms": {},  # search-fragment is sub-ms; left empty intentionally
+        "n_query_teeth": int(len(fdi_used)),
+        "n_dropped": 0,
+        "tooth_contributions": tooth_contributions,
+        "ensemble": False,
+        "ensemble_members": None,
+        "open_set_score": open_set_score,
+        "open_set_decision": open_set_decision,
+        "open_set_threshold": (
+            models.open_set_calibration["operating_point"]["threshold"]
+            if models.open_set_calibration else None
+        ),
+        "query_provenance": query_provenance,
+        "expected_person_id": expected_pid,
+        "sim_top1_percentile": sim_top1_pct,
+        "age_estimate": age_estimate,
+    }
+
+
+def run_fragment_search(
+    query_id: str,
+    tooth_indices: list[int],
+    models: PipelineModels,
+    config: PipelineConfig,
+) -> dict:
+    """Phase 9.5 — re-pool a subset of cached tooth embeddings and re-search.
+
+    Loads the teeth.npz cached during the parent /api/identify run for query_id,
+    selects the requested indices, mean-pools + L2-normalises, runs FAISS search,
+    and re-applies the same open-set + percentile scoring as /api/identify.
+    """
+    query_dir = config.temp_dir / query_id
+    npz_path = query_dir / "teeth.npz"
+    if not npz_path.exists():
+        raise FileNotFoundError(f"no cached embeddings for query_id={query_id}")
+    data = np.load(npz_path, allow_pickle=True)
+    all_embs: np.ndarray = data["embeddings"]
+    all_fdi = [str(x) for x in data["fdi"]]
+    all_fdi_conf = [float(x) for x in data["fdi_conf"]]
+
+    if not tooth_indices:
+        raise ValueError("tooth_indices must be non-empty")
+    indices = [int(i) for i in tooth_indices if 0 <= int(i) < len(all_embs)]
+    if not indices:
+        raise ValueError("no valid tooth_indices in cache range")
+
+    sub_embs = all_embs[indices]
+    pooled = sub_embs.mean(axis=0)
+    n = float(np.linalg.norm(pooled))
+    query_vec = (pooled / n if n > 1e-12 else pooled).astype(np.float32)
+
+    # Find the original upload path so provenance hashing still works.
+    upload_path = query_dir / "upload.png"
+    upload_for_provenance = upload_path if upload_path.exists() else None
+
+    payload = _build_search_payload(
+        query_vec=query_vec,
+        fdi_used=[all_fdi[i] for i in indices],
+        fdi_conf_used=[all_fdi_conf[i] for i in indices],
+        models=models,
+        config=config,
+        panoramic_path=upload_for_provenance,
+    )
+    payload["query_id"] = query_id
+    payload["tooth_indices"] = indices
+    return payload
+
+
 def _query_provenance(upload_path: Path, sha256_to_pid: dict[str, str]) -> tuple[str, str | None]:
     """Phase 9.2 — classify whether the uploaded query is a known registry image.
 
@@ -719,6 +855,19 @@ async def run_pipeline(
 
     timings["embed"] = (time.perf_counter() - t0) * 1000
 
+    # Phase 9.5 — cache per-tooth embeddings + FDI + bboxes so the fragment
+    # explorer can re-pool an arbitrary subset without re-running detection.
+    try:
+        np.savez(
+            query_dir / "teeth.npz",
+            embeddings=embeddings_arr,
+            fdi=np.array(fdi_kept, dtype=object),
+            fdi_conf=np.array(fdi_conf_kept, dtype=np.float32),
+            bboxes=bboxes_kept,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[pipeline] WARN: failed to cache teeth.npz for {query_id}: {exc}")
+
     yield {
         "event": "stage_complete",
         "data": {
@@ -727,6 +876,18 @@ async def run_pipeline(
             "elapsed_ms": round(timings["embed"], 1),
             "ensemble": ensemble,
             "ensemble_members": [m[0] for m in models.ensemble_models] if ensemble else None,
+            # Phase 9.5 — per-tooth metadata so the frontend FragmentSelector
+            # can render clickable tooth boxes on the annotated overlay.
+            "per_tooth": [
+                {
+                    "index": i,
+                    "fdi": fdi_kept[i],
+                    "fdi_confidence": fdi_conf_kept[i],
+                    "bbox": bboxes_kept[i].tolist(),
+                }
+                for i in range(len(fdi_kept))
+            ],
+            "query_id": query_id,
         },
     }
     await _dwell(timings["embed"], cfg.min_stage_dwell_ms)
@@ -896,6 +1057,8 @@ async def run_pipeline(
             "sim_top1_percentile": sim_top1_pct,
             # Phase 9.4 — Phase 8.10 age estimate (sex head intentionally not wired).
             "age_estimate": age_estimate,
+            # Phase 9.5 — query_id so the frontend can hit /api/search-fragment.
+            "query_id": query_id,
         },
     }
 
