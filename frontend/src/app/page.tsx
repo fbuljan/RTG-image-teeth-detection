@@ -6,6 +6,7 @@ import { ExamplePicks } from "@/components/ExamplePicks";
 import { ModelCard } from "@/components/ModelCard";
 import { PipelineProgress, type PipelineState } from "@/components/PipelineProgress";
 import { RegistryList, type RegistryListHandle } from "@/components/RegistryList";
+import { AboutDemo } from "@/components/AboutDemo";
 import { ResultsCards, type ResultsState } from "@/components/ResultsCards";
 import { useToasts } from "@/components/Toaster";
 import { UploadZone } from "@/components/UploadZone";
@@ -124,9 +125,12 @@ export default function Page() {
   return (
     <main className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-10 sm:px-6">
       <header className="space-y-2">
-        <h1 className="text-3xl font-bold tracking-tight">
-          Dental Identification Demo
-        </h1>
+        <div className="flex items-start justify-between gap-4">
+          <h1 className="text-3xl font-bold tracking-tight">
+            Dental Identification Demo
+          </h1>
+          <AboutDemo />
+        </div>
         <p className="max-w-3xl text-sm text-slate-600 dark:text-slate-300">
           Pick a person from the registry, download their panoramic X-ray as
           <code className="mx-1 rounded bg-slate-100 px-1 py-0.5 text-xs dark:bg-slate-800">
@@ -134,7 +138,11 @@ export default function Page() {
           </code>
           , then drop it back into the upload zone. The system will detect
           teeth, number them, embed each one, and search a registry of 1,178
-          enrolled persons for the closest match.
+          enrolled persons for the closest match.{" "}
+          <span className="text-slate-500 dark:text-slate-400">
+            (Example panoramics are themselves enrolled — re-uploading one is a self-match. Use
+            the fragment-size chips on the results, or upload a novel X-ray, to see real retrieval.)
+          </span>
         </p>
       </header>
 
