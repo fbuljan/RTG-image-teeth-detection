@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -318,9 +319,18 @@ class FragmentSearchRequest(BaseModel):
     tooth_indices: list[int]
 
 
+_QUERY_ID_RE = re.compile(r"^[a-f0-9]{1,32}$")
+
+
 @app.post("/api/search-fragment")
 def search_fragment(req: FragmentSearchRequest) -> dict:
     """Re-search the registry using a subset of the previous query's teeth."""
+    # Phase 9.5.1 — guard against path traversal. The /identify endpoint mints
+    # query_id from uuid.uuid4().hex[:12] so it's always lowercase hex; mirror
+    # the /api/intermediate validation rather than passing arbitrary strings
+    # straight into a filesystem join.
+    if not _QUERY_ID_RE.fullmatch(req.query_id):
+        raise HTTPException(status_code=400, detail="Invalid query_id")
     try:
         return run_fragment_search(
             query_id=req.query_id,

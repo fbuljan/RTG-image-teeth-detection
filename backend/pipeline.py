@@ -368,6 +368,68 @@ def _open_set_score(top1_sim: float, calibration: dict | None) -> tuple[float | 
     return float(score), decision
 
 
+def _estimate_age(
+    age_head,
+    device,
+    query_vec: np.ndarray,
+    pool_size: int,
+    open_set_decision: str,
+) -> dict | None:
+    """Phase 9.5.1 — honest age estimate.
+
+    Gate emission on the open-set verdict (rejected queries get no age — the
+    embedder is out of distribution, the head's output is meaningless). Drop
+    the prediction-driven "in_dense_bucket" CI tightening from Phase 9.4 — the
+    dense-bucket MAE in Phase 8.10 was conditioned on *ground-truth* age, and
+    at inference we don't have the ground truth. A 17-year-old whose embedding
+    saturates the head to 10.5y would otherwise inherit the tight CI and
+    confident styling. Instead: always use a single conservative CI, clamp the
+    *displayed* value to the training range [6, 18] with a saturation flag,
+    and widen further on small pools (the head was trained on per-person mean
+    embeddings — 1-tooth and 2-tooth fragments are an unvalidated pool-size
+    shift on top of the GT→YOLO shift already disclosed).
+    """
+    if age_head is None or open_set_decision == "rejected":
+        return None
+    try:
+        with torch.no_grad():
+            q = torch.from_numpy(query_vec).unsqueeze(0).to(device)
+            pred_raw = float(age_head(q).squeeze().item())
+    except Exception:
+        return None
+
+    train_lo, train_hi = 6.0, 18.0
+    # Saturation: either the head hit a training-range boundary, or the
+    # ground-truth-conditional Phase 8.10 dense-MAE never applied here. We
+    # treat anything outside [6, 13) as elevated risk since per-bucket MAE
+    # climbed to 2.09y in 16-18y.
+    saturated = pred_raw <= train_lo + 0.05 or pred_raw >= train_hi - 0.05
+    elevated_risk = saturated or pred_raw < 6.0 or pred_raw >= 13.0
+    small_pool = pool_size < 8
+
+    # CI: 2.5y covers worst-bucket MAE (16-18y: 2.09y) on GT-mean embeddings
+    # plus a GT→YOLO buffer. Small pools widen to 4.0y (no validated MAE).
+    if small_pool:
+        ci_half = 4.0
+    elif elevated_risk:
+        ci_half = 3.5
+    else:
+        ci_half = 2.5
+
+    value_display = max(train_lo, min(train_hi, pred_raw))
+    return {
+        "value": pred_raw,
+        "value_display": value_display,
+        "ci_low": max(train_lo, value_display - ci_half),
+        "ci_high": min(train_hi, value_display + ci_half),
+        "ci_half": ci_half,
+        "saturation_risk": elevated_risk,
+        "pool_size": pool_size,
+        "small_pool": small_pool,
+        "training_range": [train_lo, train_hi],
+    }
+
+
 def _sim_top1_percentile(
     sim: float, sorted_arr: np.ndarray | None,
 ) -> float | None:
@@ -392,10 +454,16 @@ def _build_search_payload(
     models: PipelineModels,
     config: PipelineConfig,
     panoramic_path: Path | None,
+    sub_embs: np.ndarray | None = None,
 ) -> dict:
     """Phase 9.5 — shared search-stage payload builder for /api/identify and
     /api/search-fragment. Takes a pooled+L2-normalised query vector and returns
     the same JSON shape the SSE search event emits.
+
+    `sub_embs` is the (n, D) array of L2-normed per-tooth embeddings that were
+    pooled into `query_vec`. When supplied, per-tooth contributions are computed
+    against the *new* top-1 — without it we leave contributions empty so the
+    frontend cannot render the stale numbers from the parent /identify run.
     """
     sims, neighbor_ids = models.registry_index.search(query_vec, k=config.top_k)
     results_list = []
@@ -415,9 +483,16 @@ def _build_search_payload(
 
     open_set_score, open_set_decision = _open_set_score(top1, models.open_set_calibration)
     sim_top1_pct = _sim_top1_percentile(top1, models.sim_top1_in_registry_sorted)
+    # Percentile is only well-defined for rank-1 — the reference distribution is
+    # held-out *correct identifications* (rank-1 hits). Applying it to ranks
+    # 2-5 silently relabels runners-up as "correct identifications observed at
+    # similarity X," which the audit flagged as a category error. Emit null for
+    # the non-top-1 ranks so the UI renders an em-dash, not a misleading number.
     for r in results_list:
-        r["similarity_percentile"] = _sim_top1_percentile(
-            r["similarity"], models.sim_top1_in_registry_sorted,
+        r["similarity_percentile"] = (
+            _sim_top1_percentile(r["similarity"], models.sim_top1_in_registry_sorted)
+            if r["rank"] == 1
+            else None
         )
 
     # Provenance only makes sense when we have a panoramic_path (full /identify run).
@@ -426,27 +501,38 @@ def _build_search_payload(
     else:
         query_provenance, expected_pid = "unknown", None
 
-    # Per-tooth contribution to top-1 (only for the teeth we *did* use).
+    # Per-tooth contribution to the *new* top-1, computed only when the caller
+    # supplied the underlying per-tooth embeddings (fragment-search path). The
+    # parent /identify run uses its own block further down with the full
+    # embeddings_arr; passing sub_embs here lets fragment search emit a
+    # contributions panel that actually matches the new top-1 it just selected
+    # (audit fix — without this, the frontend retains the original /identify
+    # contributions, which were dot products against the OLD top-1).
     tooth_contributions: list[dict] = []
-    # (Caller supplies embeddings for contribution computation if desired.)
-
-    # Age estimate runs on the same pooled query vector.
-    age_estimate: dict | None = None
-    if models.age_head is not None:
+    if sub_embs is not None and len(sub_embs) == len(fdi_used) and len(results_list) > 0:
         try:
-            with torch.no_grad():
-                q = torch.from_numpy(query_vec).unsqueeze(0).to(models.device)
-                pred = float(models.age_head(q).squeeze().item())
-            in_dense = 6.0 <= pred < 13.0
-            ci_half = 2.0 if in_dense else 3.0
-            age_estimate = {
-                "value": pred,
-                "ci_low": pred - ci_half,
-                "ci_high": pred + ci_half,
-                "in_dense_bucket": in_dense,
-            }
+            top1_person = results_list[0]["person_id"]
+            top1_idx = models.registry_index.person_ids.index(top1_person)
+            top1_vec = models.registry_index.index.reconstruct(top1_idx)
+            per_tooth_sims = sub_embs @ top1_vec  # (n_teeth,)
+            for i, fdi in enumerate(fdi_used):
+                tooth_contributions.append({
+                    "fdi": fdi,
+                    "fdi_confidence": fdi_conf_used[i],
+                    "similarity_to_top1": float(per_tooth_sims[i]),
+                })
+            tooth_contributions.sort(key=lambda c: c["similarity_to_top1"], reverse=True)
         except Exception:
-            age_estimate = None
+            tooth_contributions = []
+
+    # Age estimate — gated on open_set_decision and pool size (Phase 9.5.1).
+    age_estimate = _estimate_age(
+        age_head=models.age_head,
+        device=models.device,
+        query_vec=query_vec,
+        pool_size=len(fdi_used),
+        open_set_decision=open_set_decision,
+    )
 
     return {
         "stage": "search",
@@ -515,6 +601,7 @@ def run_fragment_search(
         models=models,
         config=config,
         panoramic_path=upload_for_provenance,
+        sub_embs=sub_embs,
     )
     payload["query_id"] = query_id
     payload["tooth_indices"] = indices
@@ -902,32 +989,6 @@ async def run_pipeline(
         per_model_query_vecs = [_pool(a) for a in ensemble_emb_arrays]  # type: ignore[arg-type]
     query_vec = _pool(embeddings_arr)
 
-    # Phase 9.4 — Phase 8.10 age regression on the pooled query vector.
-    # Reported as the headline age + the 6-13y dense bucket flag (where MAE = 0.93y).
-    # Outside 6-13y the estimate saturates (16-18y MAE = 2.09y due to ceiling effect).
-    age_estimate: dict | None = None
-    if models.age_head is not None:
-        try:
-            with torch.no_grad():
-                q = torch.from_numpy(query_vec).unsqueeze(0).to(models.device)
-                pred = float(models.age_head(q).squeeze().item())
-            in_dense = 6.0 <= pred < 13.0
-            # CI half-width: Phase 8.10's reported MAE (0.93y dense / 2.09y outside)
-            # is on GT-mean embeddings; the live demo queries with YOLO-mean
-            # embeddings, so there is a documented distribution shift that
-            # widens the real-world error. Empirical smoke (n=5, 2026-06-09):
-            # MAE ≈ 1.8y across the full range. We use ±2.0y dense / ±3.0y
-            # outside as honest indicative spreads.
-            ci_half = 2.0 if in_dense else 3.0
-            age_estimate = {
-                "value": pred,
-                "ci_low": pred - ci_half,
-                "ci_high": pred + ci_half,
-                "in_dense_bucket": in_dense,
-            }
-        except Exception:
-            age_estimate = None
-
     # --- Stage F: FAISS search ---
     t0 = time.perf_counter()
     n_candidates = len(models.registry_index)
@@ -995,12 +1056,24 @@ async def run_pipeline(
     query_provenance, expected_pid = _query_provenance(
         panoramic_path, models.panoramic_sha256_to_pid,
     )
+    # Phase 9.5.1 — age estimate, gated on open_set_decision and pool size.
+    age_estimate = _estimate_age(
+        age_head=models.age_head,
+        device=models.device,
+        query_vec=query_vec,
+        pool_size=int(len(embeddings_arr)),
+        open_set_decision=open_set_decision,
+    )
     # Phase 9.3 — empirical percentile of sim_top1 vs known-correct identifications.
     sim_top1_pct = _sim_top1_percentile(float(sims[0]), models.sim_top1_in_registry_sorted)
-    # Per-result percentile (so the UI can render each rank with a percentile).
+    # Percentile is only well-defined for rank-1 (the reference distribution is
+    # rank-1 hits from held-out correct identifications). Emit null for ranks
+    # 2-5 — see audit note in _build_search_payload.
     for r in results_list:
-        r["similarity_percentile"] = _sim_top1_percentile(
-            r["similarity"], models.sim_top1_in_registry_sorted,
+        r["similarity_percentile"] = (
+            _sim_top1_percentile(r["similarity"], models.sim_top1_in_registry_sorted)
+            if r["rank"] == 1
+            else None
         )
 
     # Per-tooth contribution: dot each tooth's embedding against the top-1

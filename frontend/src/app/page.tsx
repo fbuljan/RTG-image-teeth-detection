@@ -78,9 +78,9 @@ export default function Page() {
           if (
             evt.event === "stage_complete"
             && evt.data.stage === "embed"
-            && Array.isArray((evt.data as Record<string, unknown>).per_tooth)
+            && Array.isArray(evt.data.per_tooth)
           ) {
-            perToothRef.current = (evt.data as Record<string, unknown>).per_tooth as import("@/lib/api").PerTooth[];
+            perToothRef.current = evt.data.per_tooth;
           }
           applyEvent(evt, setPipeline, setResults, selected, perToothRef.current);
           if (evt.event === "warning") {
@@ -200,6 +200,15 @@ export default function Page() {
                       openSetThreshold: r.open_set_threshold ?? null,
                       simTop1Percentile: r.sim_top1_percentile ?? null,
                       ageEstimate: r.age_estimate ?? prev.ageEstimate,
+                      // Phase 9.5.1 — fragment search recomputes contributions
+                      // against the *new* top-1. Use them when present; if the
+                      // backend returned [], clear prev's contributions rather
+                      // than retain dot products against the previous top-1.
+                      toothContributions: r.tooth_contributions ?? [],
+                      // Backend explicitly emits timings_ms: {} for fragment
+                      // search — replace prev rather than retaining stale
+                      // detect/fdi/embed numbers from the original run.
+                      timings: r.timings_ms ?? {},
                       // Keep queryId, perTooth, provenance, expectedPersonId from the original run.
                     }
                   : prev,
@@ -285,7 +294,7 @@ function applyEvent(
           simTop1Percentile: evt.data.sim_top1_percentile ?? null,
           ageEstimate: evt.data.age_estimate ?? null,
           // Phase 9.5 — fragment-search support.
-          queryId: (evt.data as Record<string, unknown>).query_id as string ?? null,
+          queryId: evt.data.query_id ?? null,
           perTooth: perTooth ?? [],
         });
         setPipeline((prev) => ({ ...prev, status: "Done." }));

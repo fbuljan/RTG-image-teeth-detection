@@ -71,13 +71,28 @@ export type StageCompleteData = {
   sim_top1_percentile?: number | null;
   // Phase 9.4 — Phase 8.10 age estimate (sex head NOT wired; failed Pass).
   age_estimate?: AgeEstimate | null;
+  // Phase 9.5 — emitted on `embed` and `search` stage_complete events. Used
+  // by FragmentSelector to cache the query embeddings per query_id, then
+  // POST /api/search-fragment for sub-100ms re-pooling on a subset.
+  query_id?: string;
+  per_tooth?: PerTooth[];
 };
 
 export type AgeEstimate = {
+  // Raw model output, un-clamped. Kept for transparency under expert details.
   value: number;
+  // Clamped to training range [6, 18] for headline display.
+  value_display: number;
   ci_low: number;
   ci_high: number;
-  in_dense_bucket: boolean;
+  ci_half: number;
+  // True when prediction was outside the dense 6-13y bucket OR hit the
+  // training-range boundary. Display widens the CI and the chip becomes neutral.
+  saturation_risk: boolean;
+  // Number of teeth pooled into the query (16 = full panoramic, < 8 = fragment).
+  pool_size: number;
+  small_pool: boolean;
+  training_range: [number, number];
 };
 
 // Phase 9.5 — per-tooth metadata emitted by the embed stage so the frontend

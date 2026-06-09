@@ -130,9 +130,11 @@ export function AboutDemo() {
                   (Phase 8.6 design choice; trades off against 70% OOS true-rejection).
                 </li>
                 <li>
-                  Rotated AUROC 0.609 means ~40% of correctly-identified rotated queries
-                  will be flagged as &quot;probably not enrolled&quot; — a safe-failure mode
-                  but a calibration limitation.
+                  At the locked Phase 8.6 threshold (z = −0.6805), <strong>62.8%</strong> of
+                  in-registry rotated queries are rejected as &quot;probably not enrolled&quot;
+                  (rotated-stress FRR; cf. 21.4% clean). A safe-failure mode, but a calibration
+                  limitation under geometric distribution shift. Separately, the pair-ranking
+                  AUROC on rotated queries drops to 0.609 [0.552, 0.665].
                 </li>
                 <li>
                   Age regression saturates at 16-18y (regression-ceiling effect; dental

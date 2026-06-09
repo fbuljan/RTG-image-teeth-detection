@@ -86,12 +86,16 @@ function FragmentSelector({
 
   const sizes = [1, 2, 4, 8, 16, total].filter((n, i, arr) => n <= total && arr.indexOf(n) === i);
 
-  async function runAt(n: number) {
+  async function runAt(n: number, seedOverride?: number) {
     if (!state.queryId) return;
     setBusy(true);
     setActiveN(n);
     try {
-      const indices = deterministicSample(state.perTooth, n, shuffleSeed);
+      // Use seedOverride when supplied (the Shuffle button bumps the seed and
+      // re-runs in the same handler — without an explicit override, the
+      // setShuffleSeed update isn't visible to this closure until the next
+      // render, so the first Shuffle click would re-sample with the OLD seed).
+      const indices = deterministicSample(state.perTooth, n, seedOverride ?? shuffleSeed);
       const result = await searchFragment(state.queryId, indices);
       onFragmentResult?.(result);
     } catch (e) {
@@ -136,8 +140,9 @@ function FragmentSelector({
           type="button"
           disabled={busy || activeN === null}
           onClick={() => {
-            setShuffleSeed((s) => s + 1);
-            if (activeN !== null) runAt(activeN);
+            const nextSeed = shuffleSeed + 1;
+            setShuffleSeed(nextSeed);
+            if (activeN !== null) runAt(activeN, nextSeed);
           }}
           className="ml-2 rounded-md border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-white disabled:opacity-50 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-700"
         >
@@ -161,7 +166,10 @@ type VerdictTone = {
   note: string;
 };
 
-const VERDICT_COPY: Record<"likely_enrolled" | "borderline" | "rejected", VerdictTone> = {
+const VERDICT_COPY: Record<
+  "likely_enrolled" | "borderline" | "rejected" | "calibration_unavailable",
+  VerdictTone
+> = {
   likely_enrolled: {
     label: "Likely enrolled",
     badge: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
@@ -180,12 +188,29 @@ const VERDICT_COPY: Record<"likely_enrolled" | "borderline" | "rejected", Verdic
     note:
       "The calibrated open-set score is below the Phase 8.6 threshold. System believes the query person is NOT in the registry. The candidates listed below are the nearest neighbors, not predictions.",
   },
+  calibration_unavailable: {
+    label: "Calibration unavailable",
+    badge: "bg-slate-300 text-slate-800 dark:bg-slate-700 dark:text-slate-100",
+    note:
+      "Open-set calibration JSON could not be loaded, so the system cannot decide whether the query person is enrolled. Top-K below is shown as nearest neighbors only; treat raw similarities as uncalibrated and do not interpret them as identification evidence.",
+  },
 };
 
+// Phase 8.6 lower tercile on top1-top2 gap — heuristic, NOT derived from the
+// locked calibration JSON (which has no tercile field). If you regenerate the
+// calibration set, re-derive this and lift it into the JSON.
+const BORDERLINE_GAP_TERCILE = 0.001;
+
 function classifyVerdict(state: ResultsState): keyof typeof VERDICT_COPY {
+  // Audit fail-open fix: ONLY in_registry queries can render likely_enrolled /
+  // borderline. The previous version returned "likely_enrolled" for any
+  // decision that wasn't "rejected" — including "unknown" (calibration JSON
+  // missing), which rendered a green badge with copy claiming "The calibrated
+  // open-set score is above the Phase 8.6 threshold" when there was no
+  // calibrated score at all.
   if (state.openSetDecision === "rejected") return "rejected";
-  // For in-registry queries, borderline if top1-top2 gap < 0.001 (Phase 8.6 lower tercile).
-  if (state.topGap < 0.001) return "borderline";
+  if (state.openSetDecision !== "in_registry") return "calibration_unavailable";
+  if (state.topGap < BORDERLINE_GAP_TERCILE) return "borderline";
   return "likely_enrolled";
 }
 
@@ -279,7 +304,7 @@ function CalibrationStrip({
 // ---------- Tooltips ----------
 
 const PERCENTILE_HINT =
-  "Empirical percentile of this similarity within the 740 in-registry sim_top1 values from Phase 8.6 held-out enrolment. 73% means 'this similarity is higher than 73% of correct identifications observed during evaluation.' Much more legible than raw cosine, which clusters at 0.99+ for both correct and incorrect matches.";
+  "Only defined for rank #1 — the reference distribution is held-out *rank-1* hits (740 values from Phase 8.6 enrolment). 73% means 'this top-1 similarity is higher than 73% of correct identifications observed during evaluation.' Ranks 2-5 show '—' because they're runners-up, not correct identifications, so applying the same percentile would be a category error.";
 
 const VERDICT_HINT =
   "Calibrated open-set verdict, using the locked Phase 8.6 threshold (z = −0.680 on z-scored sim_top1). Likely enrolled = passes threshold with margin. Borderline = passes threshold but top-1 vs top-2 gap is in the lower tercile. Probably not enrolled = below threshold; the system thinks the query person is NOT in the registry.";
@@ -287,11 +312,14 @@ const VERDICT_HINT =
 const PROVENANCE_HINT =
   "Self-match: the uploaded image is byte-identical to an enrolled image (sim ≈ 1.0 is tautological). Novel upload: the bytes don't match any enrolled image. Held-out · OOS: a curated out-of-distribution test image (Phase 9.8). The dataset has one panoramic per person, so 'self-match' and 'enrolled' are the same set here.";
 
-const AGE_HINT_DENSE =
-  "Estimated dental age from the Phase 8.10 regression head on the frozen embedder. Pre-registered test MAE = 0.93y on the 6-13y dense bucket, BUT that number is on GT-mean embeddings; the live demo uses YOLO-mean embeddings, so the real-world error is wider (~2y in smoke testing). The ±2.0y interval reflects this distribution shift. Sex is intentionally NOT shown — the sex head failed at chance (0.556 acc, CI overlaps chance baseline 0.539).";
+const AGE_HINT_CONFIDENT =
+  "Estimated dental age from the Phase 8.10 regression head on the frozen embedder. Pre-registered MAE = 0.93y on the 6-13y dense bucket on GT-mean embeddings; the live demo uses YOLO-mean embeddings (GT→YOLO distribution shift, ~1.8y empirical MAE in smoke testing). CI ±2.5y is conservative — covers the worst observed per-bucket MAE (2.09y in 16-18y) with a buffer. Suppressed when the open-set verdict is 'probably not enrolled' (embedder is out of distribution → head output meaningless). Sex is intentionally NOT shown — the sex head failed at chance (0.556 acc).";
 
 const AGE_HINT_SATURATED =
-  "Estimated dental age. Outside the 6-13y dense bucket the model is less reliable: 16-18y reported MAE = 2.09y (regression-ceiling effect — dental development is largely complete by 17, so the model saturates) AND there is a GT→YOLO embedding distribution shift on top. The ±3.0y interval reflects this honestly. Sex is intentionally NOT shown — the sex head failed at chance in Phase 8.10.";
+  "The prediction is outside the dense 6-13y training bucket or hit the training-range boundary [6, 18]. Outside dense the head is less reliable: 16-18y reported MAE = 2.09y on GT-mean embeddings (regression-ceiling effect — dental development is largely complete by 17). CI widened to ±3.5y. Note: the dense-bucket flag is a *raw-prediction* heuristic, not ground-truth — an adult whose embedding saturates the head to e.g. 10.5y will NOT be marked saturated, so treat any in-bucket estimate as 'best-case under the GT→YOLO shift,' not a guarantee.";
+
+const AGE_HINT_SMALL_POOL =
+  "Pool size < 8 teeth. The age head was trained on per-person mean embeddings (16-tooth pools); 1-4 tooth fragments are an unvalidated pool-size shift on top of the GT→YOLO shift, so the CI is widened to ±4y as a conservative indicative spread (no per-pool-size MAE was measured in Phase 8.10).";
 
 // ---------- ResultsCards ----------
 
@@ -301,6 +329,8 @@ export function ResultsCards({ state, onReset, onFragmentResult }: Props) {
   const provenance = PROVENANCE_COPY[state.queryProvenance];
 
   const isRejected = state.openSetDecision === "rejected";
+  const isCalibrationUnavailable = verdictKey === "calibration_unavailable";
+  const isUncalibrated = isRejected || isCalibrationUnavailable;
   const topSim = state.results[0]?.similarity ?? 1;
   const bottomSim =
     state.results.length > 1
@@ -310,7 +340,7 @@ export function ResultsCards({ state, onReset, onFragmentResult }: Props) {
 
   // For OOS-rejected results we desaturate the list to communicate "these
   // are nearest neighbors, not predictions."
-  const listOpacityClass = isRejected ? "opacity-60" : "";
+  const listOpacityClass = isUncalibrated ? "opacity-60" : "";
 
   return (
     <section className="rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
@@ -324,27 +354,35 @@ export function ResultsCards({ state, onReset, onFragmentResult }: Props) {
               {provenance.label}
               <InfoHint text={PROVENANCE_HINT} />
             </span>
-            {state.ageEstimate && (
-              <span
-                className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${
-                  state.ageEstimate.in_dense_bucket
-                    ? "bg-sky-500/15 text-sky-700 ring-sky-500/30 dark:text-sky-300"
-                    : "bg-slate-200 text-slate-600 ring-slate-300 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-600"
-                }`}
-              >
-                Estimated age: {state.ageEstimate.value.toFixed(1)}
-                {" ± "}
-                {((state.ageEstimate.ci_high - state.ageEstimate.ci_low) / 2).toFixed(1)}y
-                {!state.ageEstimate.in_dense_bucket && (
-                  <span className="ml-1 text-[10px] opacity-70">(saturated)</span>
-                )}
-                <InfoHint
-                  text={
-                    state.ageEstimate.in_dense_bucket ? AGE_HINT_DENSE : AGE_HINT_SATURATED
-                  }
-                />
-              </span>
-            )}
+            {state.ageEstimate && (() => {
+              const a = state.ageEstimate;
+              const isRisky = a.saturation_risk || a.small_pool;
+              const hintText = a.small_pool
+                ? AGE_HINT_SMALL_POOL
+                : a.saturation_risk
+                  ? AGE_HINT_SATURATED
+                  : AGE_HINT_CONFIDENT;
+              const caveat = a.small_pool
+                ? `(pool n=${a.pool_size})`
+                : a.saturation_risk
+                  ? "(saturation risk)"
+                  : null;
+              return (
+                <span
+                  className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${
+                    isRisky
+                      ? "bg-slate-200 text-slate-600 ring-slate-300 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-600"
+                      : "bg-sky-500/15 text-sky-700 ring-sky-500/30 dark:text-sky-300"
+                  }`}
+                >
+                  Estimated age: {a.value_display.toFixed(1)}
+                  {" ± "}
+                  {a.ci_half.toFixed(1)}y
+                  {caveat && <span className="ml-1 text-[10px] opacity-70">{caveat}</span>}
+                  <InfoHint text={hintText} />
+                </span>
+              );
+            })()}
           </div>
           <p className="text-sm text-slate-500 dark:text-slate-400">
             {`Queried with ${state.nQueryTeeth} teeth`}
@@ -404,11 +442,16 @@ export function ResultsCards({ state, onReset, onFragmentResult }: Props) {
           </div>
         )}
 
-        {/* Top-K list (desaturated when rejected) */}
+        {/* Top-K list (desaturated when rejected OR calibration is unavailable) */}
         <div className={listOpacityClass}>
           {isRejected && (
             <p className="mb-2 text-xs italic text-slate-500 dark:text-slate-400">
               Closest candidates (below identification threshold — listed for context, not as predictions).
+            </p>
+          )}
+          {isCalibrationUnavailable && (
+            <p className="mb-2 text-xs italic text-slate-500 dark:text-slate-400">
+              Closest candidates (calibration JSON missing — listed for context, NOT as calibrated identifications).
             </p>
           )}
           <div
