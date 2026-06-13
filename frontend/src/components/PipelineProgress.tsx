@@ -4,6 +4,14 @@ import { intermediateUrl } from "@/lib/api";
 
 export type StageState = "idle" | "active" | "done";
 
+// Phase 9.9 — chronological log of teeth that have been embedded so far.
+// `embedded` is the per-progress-event slice (last 1-4 teeth); the parent
+// builds the running history by concatenation.
+export type EmbeddedTooth = {
+  fdi: string;
+  fdi_confidence: number;
+};
+
 export type PipelineState = {
   stageA: StageState;
   fdi: StageState;
@@ -14,6 +22,10 @@ export type PipelineState = {
   error?: string;
   currentImageUrl: string | null;
   embedProgress?: { current: number; total: number };
+  // Phase 9.9 — running list of embedded teeth (FDI + conf) updated live as
+  // the embed stage progresses, so users can see numbering decisions in real
+  // time instead of an opaque "11/16" counter.
+  embeddedTeeth?: EmbeddedTooth[];
   toothCount?: number;
   mode: "detection" | "segmentation";
   // Phase 9.6 — when true, stageA label becomes "Validate" and the FDI
@@ -101,6 +113,36 @@ export function PipelineProgress({ state }: Props) {
           <p className="mt-4 text-center text-sm text-slate-500 dark:text-slate-400">
             {state.toothCount} teeth processed
           </p>
+        )}
+
+        {/* Phase 9.9 — live FDI confidence list while embed stage is running. */}
+        {state.embed === "active" && state.embeddedTeeth && state.embeddedTeeth.length > 0 && (
+          <div className="mt-4">
+            <h4 className="mb-2 text-center text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Embedded so far · live FDI numbering
+            </h4>
+            <div className="mx-auto flex max-w-3xl flex-wrap justify-center gap-1.5">
+              {state.embeddedTeeth.map((t, i) => {
+                const conf = t.fdi_confidence;
+                const tone =
+                  conf >= 0.7
+                    ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200"
+                    : conf >= 0.5
+                    ? "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"
+                    : "bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-200";
+                return (
+                  <span
+                    key={`${t.fdi}-${i}`}
+                    className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-mono text-xs ${tone}`}
+                    title={`FDI ${t.fdi} · classifier confidence ${(conf * 100).toFixed(0)}%`}
+                  >
+                    <span className="font-semibold">{t.fdi}</span>
+                    <span className="opacity-70">{(conf * 100).toFixed(0)}%</span>
+                  </span>
+                );
+              })}
+            </div>
+          </div>
         )}
 
         {state.warnings.length > 0 && (

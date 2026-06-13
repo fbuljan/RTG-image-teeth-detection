@@ -125,7 +125,7 @@ export function CropsUploadZone({
           />
         </div>
         <p className="text-sm text-slate-500 dark:text-slate-400">
-          Forensic scenario: you have a handful of post-mortem tooth crops but no panoramic. Phase 5 priors:
+          Forensic scenario: you have a handful of post-mortem tooth crops but no panoramic. Pre-registered priors:
           {" "}N=4 → R1 ≈ 21%, N=8 → R1 ≈ 45%, N=16 → R1 ≈ 83%.
         </p>
       </header>

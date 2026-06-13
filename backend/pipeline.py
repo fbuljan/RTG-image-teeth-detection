@@ -456,6 +456,7 @@ def _build_search_payload(
     config: PipelineConfig,
     panoramic_path: Path | None,
     sub_embs: np.ndarray | None = None,
+    yolo_conf_used: list[float] | None = None,
 ) -> dict:
     """Phase 9.5 — shared search-stage payload builder for /api/identify and
     /api/search-fragment. Takes a pooled+L2-normalised query vector and returns
@@ -520,6 +521,14 @@ def _build_search_payload(
                 tooth_contributions.append({
                     "fdi": fdi,
                     "fdi_confidence": fdi_conf_used[i],
+                    # Phase 9.9 — YOLO conf when caller supplied it (fragment
+                    # path threads it from teeth.npz cache; older callers omit
+                    # → null surfaced as em-dash in the UI).
+                    "yolo_confidence": (
+                        float(yolo_conf_used[i])
+                        if yolo_conf_used is not None and i < len(yolo_conf_used)
+                        else None
+                    ),
                     "similarity_to_top1": float(per_tooth_sims[i]),
                 })
             tooth_contributions.sort(key=lambda c: c["similarity_to_top1"], reverse=True)
@@ -543,6 +552,9 @@ def _build_search_payload(
         "timings_ms": {},  # search-fragment is sub-ms; left empty intentionally
         "n_query_teeth": int(len(fdi_used)),
         "n_dropped": 0,
+        # Phase 9.9 — empty list so the UI consistently sees an array (no
+        # fragment-search drops happen; the subset is user-chosen).
+        "dropped": [],
         "tooth_contributions": tooth_contributions,
         "ensemble": False,
         "ensemble_members": None,
@@ -579,6 +591,15 @@ def run_fragment_search(
     all_embs: np.ndarray = data["embeddings"]
     all_fdi = [str(x) for x in data["fdi"]]
     all_fdi_conf = [float(x) for x in data["fdi_conf"]]
+    # Phase 9.9 — yolo_conf is optional in the cache for back-compat with
+    # queries cached before 9.9. When absent, we pass `None` to the builder so
+    # the per-tooth table renders em-dashes — emitting 0.0 would be a lie
+    # (every detection had SOME confidence; we just didn't cache it).
+    has_yolo_conf = "yolo_conf" in data.files
+    if has_yolo_conf:
+        all_yolo_conf = [float(x) for x in data["yolo_conf"]]
+    else:
+        all_yolo_conf = None  # type: ignore[assignment]
 
     if not tooth_indices:
         raise ValueError("tooth_indices must be non-empty")
@@ -599,6 +620,9 @@ def run_fragment_search(
         query_vec=query_vec,
         fdi_used=[all_fdi[i] for i in indices],
         fdi_conf_used=[all_fdi_conf[i] for i in indices],
+        yolo_conf_used=(
+            [all_yolo_conf[i] for i in indices] if all_yolo_conf is not None else None
+        ),
         models=models,
         config=config,
         panoramic_path=upload_for_provenance,
@@ -1123,11 +1147,31 @@ async def run_pipeline(
     bboxes_kept = bboxes[keep_indices]
     fdi_kept = [fdi_labels[i] for i in keep_indices]
     fdi_conf_kept = [float(fdi_confidences[i]) for i in keep_indices]
+    yolo_conf_kept = [float(confidences[i]) for i in keep_indices]
     crops_kept = [crops[i] for i in keep_indices]
     masked_crops_kept = [masked_crops[i] for i in keep_indices]
     polygons_kept = (
         [polygons[i] for i in keep_indices] if polygons else None
     )
+
+    # Phase 9.9 — structured drop list so the UI can explain *why* each tooth
+    # was dropped (currently the only reason is "FDI duplicate"; the winner +
+    # both confidences let users see the dedup decision).
+    dropped_detail: list[dict] = []
+    for d in dropped:
+        idx = d["index"]
+        fdi = d["fdi"]
+        winner_idx = seen.get(fdi)
+        dropped_detail.append({
+            "fdi": fdi,
+            "reason": d["reason"],
+            "fdi_confidence": float(fdi_confidences[idx]),
+            "yolo_confidence": float(confidences[idx]),
+            "kept_index": int(winner_idx) if winner_idx is not None else None,
+            "kept_fdi_confidence": (
+                float(fdi_confidences[winner_idx]) if winner_idx is not None else None
+            ),
+        })
 
     n_uncertain = int(sum(1 for c in fdi_conf_kept if c < 0.5))
 
@@ -1141,6 +1185,13 @@ async def run_pipeline(
     )
     timings["fdi"] = (time.perf_counter() - t0) * 1000
 
+    # Phase 9.9 — dropped[] is the structured drop list (kept count via n_dropped).
+    # NOTE: per_kept (per-kept-tooth FDI+conf+YOLO list) is intentionally NOT
+    # emitted from this stage_complete — the same data flows live through the
+    # `embed` progress events (the "Embedded so far" panel), which is the
+    # surface the user actually watches mid-pipeline. The full kept list also
+    # arrives on the `embed` stage_complete via `per_tooth`. Emitting `per_kept`
+    # here too would be a redundant payload with no consumer.
     yield {
         "event": "stage_complete",
         "data": {
@@ -1148,6 +1199,7 @@ async def run_pipeline(
             "n_teeth": len(crops_kept),
             "n_uncertain": n_uncertain,
             "n_dropped": len(dropped),
+            "dropped": dropped_detail,
             "annotated_image_url": f"/api/intermediate/{query_id}/fdi_overlay.png",
             "elapsed_ms": round(timings["fdi"], 1),
         },
@@ -1192,6 +1244,11 @@ async def run_pipeline(
         per_model_embeddings: list[list[np.ndarray]] = [
             [] for _ in models.ensemble_models
         ]
+        # Phase 9.9 — track index of last-emitted tooth so the embed-progress
+        # `embedded` slice is exclusive of prior batches and includes every
+        # tooth exactly once, even when n_teeth is not a multiple of the
+        # batch size.
+        last_emitted = 0
         # Pre-compute raw and masked tensors once per tooth.
         with torch.no_grad():
             for i, (crop, fdi, masked_crop) in enumerate(
@@ -1215,10 +1272,25 @@ async def run_pipeline(
                         emb = model(tensor)
                     per_model_embeddings[j].append(emb.cpu().numpy()[0])
                 if (i + 1) % 4 == 0 or i == len(crops_kept) - 1:
+                    # Phase 9.9 — emit FDI labels embedded since the previous
+                    # progress event so the running list contains each tooth
+                    # exactly once regardless of n_teeth modulo batch size.
                     yield {
                         "event": "progress",
-                        "data": {"stage": "embed", "current": i + 1, "total": len(crops_kept)},
+                        "data": {
+                            "stage": "embed",
+                            "current": i + 1,
+                            "total": len(crops_kept),
+                            "embedded": [
+                                {
+                                    "fdi": fdi_kept[k],
+                                    "fdi_confidence": fdi_conf_kept[k],
+                                }
+                                for k in range(last_emitted, i + 1)
+                            ],
+                        },
                     }
+                    last_emitted = i + 1
                     await asyncio.sleep(0)
         ensemble_emb_arrays = [np.stack(lst) for lst in per_model_embeddings]
         # Use the FDI-init array (first non-baseline non-masked-non-metadata) as
@@ -1231,6 +1303,8 @@ async def run_pipeline(
         embeddings_arr = ensemble_emb_arrays[canonical_idx]
     else:
         embeddings = []
+        # Phase 9.9 — see ensemble branch comment above re last_emitted.
+        last_emitted = 0
         with torch.no_grad():
             for i, (crop, fdi) in enumerate(zip(crops_kept, fdi_kept)):
                 tensor = _to_tensor(crop, cfg.crop_size, device)
@@ -1244,10 +1318,23 @@ async def run_pipeline(
                     emb = models.embedder(tensor)
                 embeddings.append(emb.cpu().numpy()[0])
                 if (i + 1) % 4 == 0 or i == len(crops_kept) - 1:
+                    # Phase 9.9 — see ensemble branch above.
                     yield {
                         "event": "progress",
-                        "data": {"stage": "embed", "current": i + 1, "total": len(crops_kept)},
+                        "data": {
+                            "stage": "embed",
+                            "current": i + 1,
+                            "total": len(crops_kept),
+                            "embedded": [
+                                {
+                                    "fdi": fdi_kept[k],
+                                    "fdi_confidence": fdi_conf_kept[k],
+                                }
+                                for k in range(last_emitted, i + 1)
+                            ],
+                        },
                     }
+                    last_emitted = i + 1
                     await asyncio.sleep(0)
         embeddings_arr = np.stack(embeddings)
         ensemble_emb_arrays = None  # type: ignore[assignment]
@@ -1262,6 +1349,10 @@ async def run_pipeline(
             embeddings=embeddings_arr,
             fdi=np.array(fdi_kept, dtype=object),
             fdi_conf=np.array(fdi_conf_kept, dtype=np.float32),
+            # Phase 9.9 — cache YOLO conf alongside FDI conf so the fragment
+            # explorer's per-tooth contribution table can show both columns
+            # consistently with the parent /identify run.
+            yolo_conf=np.array(yolo_conf_kept, dtype=np.float32),
             bboxes=bboxes_kept,
         )
     except Exception as exc:  # noqa: BLE001
@@ -1277,11 +1368,14 @@ async def run_pipeline(
             "ensemble_members": [m[0] for m in models.ensemble_models] if ensemble else None,
             # Phase 9.5 — per-tooth metadata so the frontend FragmentSelector
             # can render clickable tooth boxes on the annotated overlay.
+            # Phase 9.9 — also expose yolo_confidence (already extracted at
+            # Stage A, previously discarded).
             "per_tooth": [
                 {
                     "index": i,
                     "fdi": fdi_kept[i],
                     "fdi_confidence": fdi_conf_kept[i],
+                    "yolo_confidence": yolo_conf_kept[i],
                     "bbox": bboxes_kept[i].tolist(),
                 }
                 for i in range(len(fdi_kept))
@@ -1494,6 +1588,8 @@ async def run_pipeline(
             tooth_contributions.append({
                 "fdi": fdi,
                 "fdi_confidence": fdi_conf_kept[i],
+                # Phase 9.9 — surface YOLO detection conf alongside FDI conf.
+                "yolo_confidence": yolo_conf_kept[i],
                 "similarity_to_top1": float(per_tooth_sims[i]),
             })
         tooth_contributions.sort(key=lambda c: c["similarity_to_top1"], reverse=True)
@@ -1512,6 +1608,9 @@ async def run_pipeline(
             "timings_ms": {k: round(v, 1) for k, v in timings.items()},
             "n_query_teeth": int(len(embeddings_arr)),
             "n_dropped": len(dropped),
+            # Phase 9.9 — structured drop list so the UI can render "which
+            # tooth lost the FDI dedup, and to whom" instead of just a count.
+            "dropped": dropped_detail,
             "tooth_contributions": tooth_contributions,
             "ensemble": ensemble,
             "ensemble_members": [m[0] for m in models.ensemble_models] if ensemble else None,
@@ -1754,6 +1853,9 @@ async def run_crops_pipeline(
             tooth_contributions.append({
                 "fdi": fdi,
                 "fdi_confidence": fdi_conf_kept[i],
+                # Phase 9.9 — crops path has no YOLO (uploads bypass detection);
+                # null surfaces as em-dash in the per-tooth table.
+                "yolo_confidence": None,
                 "similarity_to_top1": float(per_tooth_sims[i]),
             })
         tooth_contributions.sort(key=lambda c: c["similarity_to_top1"], reverse=True)
@@ -1772,6 +1874,30 @@ async def run_crops_pipeline(
             "timings_ms": {k: round(v, 1) for k, v in timings.items()},
             "n_query_teeth": int(len(embeddings_arr)),
             "n_dropped": sum(1 for r in per_crop_records if r["dropped_as_duplicate"]),
+            # Phase 9.9 — synthesise the same shape used by the panoramic path.
+            # YOLO conf is absent for uploads (crops bypass detection).
+            # kept_fdi_confidence is the auto-confidence of the kept (winner)
+            # crop sharing this FDI; the UI uses it to render the dedup
+            # comparison ("dropped at X% — kept at Y%").
+            "dropped": [
+                {
+                    "fdi": r["chosen_fdi"],
+                    "reason": "duplicate",
+                    "fdi_confidence": r["auto_fdi_confidence"],
+                    "yolo_confidence": None,
+                    "kept_index": None,
+                    "kept_fdi_confidence": next(
+                        (
+                            k["auto_fdi_confidence"]
+                            for k in per_crop_records
+                            if k["chosen_fdi"] == r["chosen_fdi"] and k.get("kept")
+                        ),
+                        None,
+                    ),
+                }
+                for r in per_crop_records
+                if r.get("dropped_as_duplicate")
+            ],
             "tooth_contributions": tooth_contributions,
             "ensemble": False,
             "ensemble_members": None,

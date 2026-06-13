@@ -53,9 +53,8 @@ export function AboutDemo() {
               </p>
               <p>
                 A real forensic deployment would scope the registry to enrolled cases
-                only (the Phase 9.7 session-enrolment flow demonstrates this — your
-                additions live in a 24h session-scoped index, separate from the canonical
-                read-only one).
+                only — the session-enrolment flow demonstrates this. Your additions live
+                in a 24h session-scoped index, separate from the canonical read-only one.
               </p>
             </section>
 
@@ -65,13 +64,12 @@ export function AboutDemo() {
                 <li>
                   <strong>R1 = 82.6% [79.8, 86.0]</strong> closed-set retrieval, n=178 held-out test
                   PIDs, full-panoramic query against the 1,178-person registry, mean-pooled
-                  YOLO-cropped teeth (Phase 8.0 re-baseline 2026-06-08).
+                  YOLO-cropped teeth.
                 </li>
                 <li>
                   <strong>Open-set AUROC = 0.832 [0.796, 0.870]</strong> clean
-                  / <strong>0.609 [0.552, 0.665]</strong> rotated, locked threshold from
-                  Phase 8.6. The Verdict + calibration strip you see on every result is
-                  driven by this calibration.
+                  / <strong>0.609 [0.552, 0.665]</strong> rotated. The Verdict + calibration
+                  strip you see on every result is driven by this calibration.
                 </li>
                 <li>
                   <strong>Single-tooth R1 ≈ 3.6%</strong> against the 1,178-person registry —
@@ -79,12 +77,12 @@ export function AboutDemo() {
                   is the empirical signature of mean-pool aggregation working as intended.
                 </li>
                 <li>
-                  <strong>Age MAE = 0.93y</strong> on the 6-13y dense bucket (Phase 8.10
-                  reported number on GT-mean embeddings; the live demo uses YOLO-mean
-                  embeddings, so the real-world error is wider — see the age chip tooltip).
+                  <strong>Age MAE = 0.93y</strong> on the 6-13y dense bucket (reported
+                  number on GT-mean embeddings; the live demo uses YOLO-mean embeddings, so
+                  the real-world error is wider — see the age chip tooltip).
                 </li>
                 <li>
-                  <strong>Sex is NOT shown.</strong> The Phase 8.10 sex head failed at chance
+                  <strong>Sex is NOT shown.</strong> The sex head failed at chance
                   (0.556 acc, CI overlaps chance baseline 0.539). Wiring it would mislead
                   users; we honour the pre-registered Pass/Fail rule.
                 </li>
@@ -102,8 +100,8 @@ export function AboutDemo() {
                 <li>
                   <strong>Use the Fragment-size chips</strong> on any result: at N=4 or N=8,
                   the query is no longer the full enrolled mean, so the calibration honestly
-                  separates correct from wrong identifications (Phase 5 priors: N=4 → R1 ≈ 21%,
-                  N=8 → R1 ≈ 45%).
+                  separates correct from wrong identifications (pre-registered priors:
+                  N=4 → R1 ≈ 21%, N=8 → R1 ≈ 45%).
                 </li>
                 <li>
                   <strong>Upload a panoramic of someone not in the example list.</strong> The
@@ -113,9 +111,9 @@ export function AboutDemo() {
                 </li>
                 <li>
                   <strong>Rotate or crop the X-ray before uploading.</strong> The bytes change
-                  → provenance flips to novel → you see the rotated-stress regime (Phase 8.6
-                  rotated AUROC 0.609; some queries will be over-confidently kept, others
-                  correctly rejected).
+                  → provenance flips to novel → you see the rotated-stress regime (rotated
+                  AUROC 0.609; some queries will be over-confidently kept, others correctly
+                  rejected).
                 </li>
               </ul>
             </section>
@@ -127,10 +125,11 @@ export function AboutDemo() {
               <ul className="ml-5 list-disc space-y-1">
                 <li>
                   21.4% in-registry false-rejection rate at the locked operating point
-                  (Phase 8.6 design choice; trades off against 70% OOS true-rejection).
+                  (design choice; trades off against 70% OOS true-rejection design target,
+                  69.3% achieved on test-clean).
                 </li>
                 <li>
-                  At the locked Phase 8.6 threshold (z = −0.6805), <strong>62.8%</strong> of
+                  At the locked threshold (z = −0.6805), <strong>62.8%</strong> of
                   in-registry rotated queries are rejected as &quot;probably not enrolled&quot;
                   (rotated-stress FRR; cf. 21.4% clean). A safe-failure mode, but a calibration
                   limitation under geometric distribution shift. Separately, the pair-ranking
@@ -141,13 +140,13 @@ export function AboutDemo() {
                   development is largely complete by 17).
                 </li>
                 <li>
-                  Partial-fragment calibration is not re-derived: the Phase 8.6 thresholds
-                  were learned on full-panoramic queries, so at N&lt;8 the verdict reflects
-                  the closest in-distribution comparison the calibration can offer, not a
-                  fresh fragment-specific decision.
+                  Partial-fragment calibration is not re-derived: the thresholds were learned
+                  on full-panoramic queries, so at N&lt;8 the verdict reflects the closest
+                  in-distribution comparison the calibration can offer, not a fresh
+                  fragment-specific decision.
                 </li>
                 <li>
-                  Session enrolments (Phase 9.7) are non-durable: they expire after 24h.
+                  Session enrolments are non-durable: they expire after 24h.
                 </li>
               </ul>
             </section>

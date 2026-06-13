@@ -231,9 +231,9 @@ export function EnrolModal({
             <p className="text-xs text-slate-500">
               Canonical 1,178-person registry is unchanged. The
               <em> verify by re-querying</em> button below re-uploads the same
-              file through /api/identify. A correct rank-1 self-match
-              demonstrates the FAISS round-trip works — it is NOT a calibrated
-              identification claim (Phase 8.6 calibration is canonical-only).
+              file through the identify endpoint. A correct rank-1 self-match
+              demonstrates the retrieval round-trip works — it is NOT a calibrated
+              identification claim (the locked calibration is canonical-only).
             </p>
             <div className="flex items-center justify-end gap-2 border-t border-slate-200 pt-4 dark:border-slate-800">
               <button

@@ -107,6 +107,11 @@ type ModelCardPayload = {
   ensemble_available?: boolean;
   eval_test?: { verification: VerificationMetrics; retrieval: RetrievalMetrics };
   multi_tooth_sweep?: SweepEntry[];
+  // Legacy Phase 5 GT-crop single-model sweep, kept as the apples-to-apples
+  // comparator for the offline GT-crop ensemble block (so the ensemble Δ
+  // column compares GT vs GT, not GT-ensemble vs deployed-YOLO-pipeline).
+  // Not rendered as a standalone table.
+  multi_tooth_sweep_gt_anchor?: SweepEntry[];
   forensic_1tooth?: SweepEntry[];
   per_category?: CategoryRow[];
   subgroups?: SubgroupRow[];
@@ -217,7 +222,11 @@ function ModelCardBody({ data }: { data: ModelCardPayload }) {
         <EnsembleBlock
           ensemble={data.ensemble}
           ensembleYolo={data.ensemble_yolo}
-          singleSweep={data.multi_tooth_sweep}
+          // GT-crop ensemble vs GT-crop single-model anchor (apples-to-apples).
+          // Falls back to the deployed sweep only if the legacy GT anchor is
+          // unavailable — but the backend always serves both, so this is a
+          // belt-and-braces fallback.
+          singleSweep={data.multi_tooth_sweep_gt_anchor ?? data.multi_tooth_sweep}
         />
       )}
       {data.per_category && data.per_category.length > 0 && (
@@ -398,13 +407,14 @@ function MultiToothBlock({ sweep }: { sweep: SweepEntry[] }) {
   return (
     <div>
       <SectionTitle
-        title="Multi-tooth retrieval — headline result"
-        hint="For each n_query, hold out N teeth as query, aggregate the rest into a gallery profile, mean-pool both sides. Averaged over multiple trials per query size. This is the regime the deployed demo actually operates in."
+        title="Multi-tooth retrieval — deployed pipeline"
+        hint="For each n_query, hold out N teeth as query, aggregate the rest into a gallery profile, mean-pool both sides. Averaged over multiple trials per query size, with 95% bootstrap confidence intervals. This is the deployed FDI-init single-model embedder on YOLO-cropped teeth against the 1,178-person YOLO-built registry — the same pipeline the live demo runs. Headline R1 = 82.6% [79.8, 86.0] at n_query=16. mAP is not computed for this sweep protocol."
       />
       <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
-        With multi-tooth aggregation, Rank-1 climbs from ~10% (one tooth) to
-        55% (16 teeth) and Rank-5 to over 92% — the operating regime of the
-        live demo.
+        With multi-tooth aggregation, Rank-1 climbs from ~3% (one tooth) to
+        <strong> 82.6%</strong> (16 teeth) and Rank-5 to over 97%. This is
+        the deployed pipeline: FDI-init embedder on YOLO crops, searched
+        against the YOLO-built 1,178-person registry.
       </p>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">

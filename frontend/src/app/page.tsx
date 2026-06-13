@@ -352,6 +352,15 @@ export default function Page() {
                       // backend returned [], clear prev's contributions rather
                       // than retain dot products against the previous top-1.
                       toothContributions: r.tooth_contributions ?? [],
+                      // Phase 9.9 — fragment search emits its own dropped:[]
+                      // (always empty since user-chosen subsets don't dedup).
+                      // n_dropped from the parent /identify run is also stale
+                      // — those duplicates were on the full set, not on this
+                      // user-chosen subset. Reset both together so the header
+                      // doesn't read "Queried with 4 teeth · 2 duplicates
+                      // dropped" when the 4 chosen teeth had no dedup at all.
+                      nDropped: r.n_dropped ?? 0,
+                      dropReasons: r.dropped ?? [],
                       // Backend explicitly emits timings_ms: {} for fragment
                       // search — replace prev rather than retaining stale
                       // detect/fdi/embed numbers from the original run.
@@ -406,17 +415,29 @@ function applyEvent(
           stage === "embed" && typeof evt.data.total === "number"
             ? { current: 0, total: evt.data.total }
             : prev.embedProgress,
+        // Phase 9.9 — reset the live FDI list when embed re-starts so a
+        // re-run doesn't show stale teeth from the previous query.
+        embeddedTeeth: stage === "embed" ? [] : prev.embeddedTeeth,
       }));
       return;
     }
     case "progress": {
       if (evt.data.stage !== "embed") return;
+      const newlyEmbedded = evt.data.embedded ?? [];
       setPipeline((prev) => ({
         ...prev,
         embedProgress: {
           current: evt.data.current,
           total: evt.data.total,
         },
+        // Phase 9.9 — append the slice of teeth just embedded. The backend
+        // batches ~4 per progress event; concatenate to build the running
+        // history, slicing to `current` so we never exceed the announced
+        // count even if the SSE replays a previously seen batch.
+        embeddedTeeth: [
+          ...(prev.embeddedTeeth ?? []),
+          ...newlyEmbedded,
+        ].slice(0, evt.data.current),
       }));
       return;
     }
@@ -439,6 +460,10 @@ function applyEvent(
           timings: evt.data.timings_ms ?? {},
           nQueryTeeth: evt.data.n_query_teeth ?? 0,
           nDropped: evt.data.n_dropped ?? 0,
+          // Phase 9.9 — backend search-stage payload now carries a structured
+          // list. Default to [] so the UI's narrative ("0 dropped" path)
+          // doesn't tip into "unknown" just because the payload omits it.
+          dropReasons: evt.data.dropped ?? [],
           toothContributions: evt.data.tooth_contributions,
           selectedPersonId: selected?.person_id,
           selectedFakeName: selected?.fake_name,

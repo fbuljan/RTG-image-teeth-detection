@@ -4,6 +4,7 @@ import { useState } from "react";
 import { InfoHint } from "@/components/InfoHint";
 import type {
   AgeEstimate,
+  DropReason,
   OpenSetDecision,
   PerTooth,
   QueryProvenance,
@@ -19,6 +20,10 @@ export type ResultsState = {
   timings: Record<string, number>;
   nQueryTeeth: number;
   nDropped: number;
+  // Phase 9.9 — structured list of dropped teeth (currently only FDI
+  // duplicates). Empty when the backend ran the panoramic path with no dedup
+  // collisions; undefined for stale callers.
+  dropReasons?: DropReason[];
   toothContributions?: ToothContribution[];
   selectedPersonId?: string;
   selectedFakeName?: string;
@@ -46,15 +51,17 @@ type Props = {
   onFragmentResult?: (result: import("@/lib/api").FragmentSearchResponse) => void;
 };
 
-// Phase 5 priors (pre-registered): R1 vs gallery as a function of n_query.
-// Used by the FragmentSelector to display "expected outcome at this N" so a
-// rank-1 miss reads as a confirmed data point not a credibility loss.
+// Deployed-protocol full-registry priors (sweep_full_registry from
+// phase8_deployed_yolo_reg/yolo_eval.json — same protocol that defines
+// R1@n=16=82.6% on the 1,178-person registry). Used by the FragmentSelector
+// to display "expected outcome at this N" so a rank-1 miss reads as a
+// confirmed data point not a credibility loss.
 const FRAGMENT_PRIORS: Record<number, { r1: number; r5: number }> = {
-  1: { r1: 0.029, r5: 0.083 },
-  2: { r1: 0.088, r5: 0.183 },
-  4: { r1: 0.209, r5: 0.346 },
-  8: { r1: 0.446, r5: 0.617 },
-  16: { r1: 0.826, r5: 0.898 },
+  1: { r1: 0.029, r5: 0.127 },
+  2: { r1: 0.088, r5: 0.281 },
+  4: { r1: 0.209, r5: 0.460 },
+  8: { r1: 0.446, r5: 0.733 },
+  16: { r1: 0.826, r5: 0.973 },
 };
 
 function deterministicSample<T>(items: T[], n: number, seed: number): number[] {
@@ -132,7 +139,7 @@ function FragmentSelector({
               }`}
               title={
                 prior
-                  ? `Phase 5 prior at N=${n}: R1 = ${(prior.r1 * 100).toFixed(0)}%, R5 = ${(prior.r5 * 100).toFixed(0)}%`
+                  ? `Pre-registered prior at N=${n}: R1 = ${(prior.r1 * 100).toFixed(0)}%, R5 = ${(prior.r5 * 100).toFixed(0)}%`
                   : `Use all ${n} detected teeth`
               }
             >
@@ -154,7 +161,7 @@ function FragmentSelector({
         </button>
         <InfoHint
           text={
-            "Re-run the search with a random subset of N teeth from this query. Phase 5 priors (full-registry R1): N=1 ≈ 3%, N=2 ≈ 9%, N=4 ≈ 21%, N=8 ≈ 45%, N=16 ≈ 83%. A wrong rank-1 at small N is expected, not a failure — it shows the system's honest operating regime when only a fragment is available."
+            "Re-run the search with a random subset of N teeth from this query. Pre-registered priors (full-registry R1): N=1 ≈ 3%, N=2 ≈ 9%, N=4 ≈ 21%, N=8 ≈ 45%, N=16 ≈ 83%. A wrong rank-1 at small N is expected, not a failure — it shows the system's honest operating regime when only a fragment is available."
           }
         />
       </div>
@@ -178,7 +185,7 @@ const VERDICT_COPY: Record<
     label: "Likely enrolled",
     badge: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
     note:
-      "The calibrated open-set score is above the Phase 8.6 threshold and the top-1 match leads the runners-up by a clear margin. System believes the query person is in the registry.",
+      "The calibrated open-set score is above the locked decision threshold and the top-1 match leads the runners-up by a clear margin. System believes the query person is in the registry.",
   },
   borderline: {
     label: "Borderline",
@@ -190,7 +197,7 @@ const VERDICT_COPY: Record<
     label: "Probably not enrolled",
     badge: "bg-rose-500/20 text-rose-700 dark:text-rose-300",
     note:
-      "The calibrated open-set score is below the Phase 8.6 threshold. System believes the query person is NOT in the registry. The candidates listed below are the nearest neighbors, not predictions.",
+      "The calibrated open-set score is below the locked decision threshold. System believes the query person is NOT in the registry. The candidates listed below are the nearest neighbors, not predictions.",
   },
   calibration_unavailable: {
     label: "Calibration unavailable",
@@ -236,7 +243,7 @@ const PROVENANCE_COPY: Record<QueryProvenance, { label: string; chip: string; ba
     label: "Held-out · OOS",
     chip: "bg-purple-500/15 text-purple-700 ring-purple-500/30 dark:text-purple-300",
     banner:
-      "This is a curated out-of-distribution test image. The system should ideally reject it as 'probably not enrolled.' Rotated AUROC was 0.609 in Phase 8.6, so some of these will slip past the rejection threshold.",
+      "This is a curated out-of-distribution test image. The system should ideally reject it as 'probably not enrolled.' Rotated AUROC was 0.609 on held-out evaluation, so some of these will slip past the rejection threshold.",
   },
   unknown: {
     label: "Provenance unknown",
@@ -270,11 +277,21 @@ function CalibrationStrip({
   const scorePct = pct(score);
   const thrPct = pct(threshold);
   const isAccepted = decision === "in_registry";
+  // Phase 9.9 — distance from threshold in z-score space; positive = above
+  // threshold (accepted), negative = below (rejected). Used in the inline
+  // tooltip so the user can read "+0.94 above threshold" at a glance.
+  const gap = score - threshold;
+  const gapSign = gap >= 0 ? "+" : "";
+  const gapAbsStr = Math.abs(gap).toFixed(3);
+  const gapPhrase = gap >= 0 ? "above" : "below";
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
         <span>Probably not enrolled</span>
-        <span>Likely enrolled</span>
+        <span className="inline-flex items-center">
+          Likely enrolled
+          <InfoHint text={CALIBRATION_GAP_HINT} />
+        </span>
       </div>
       <div className="relative h-3 rounded-full bg-gradient-to-r from-rose-300/50 via-amber-300/50 to-emerald-300/50">
         {/* Threshold marker (vertical line) */}
@@ -289,15 +306,17 @@ function CalibrationStrip({
             isAccepted ? "bg-emerald-600" : "bg-rose-600"
           }`}
           style={{ left: `calc(${scorePct}% - 3px)` }}
-          title={`Your z-score: ${score.toFixed(3)}`}
+          title={`Your z-score: ${score.toFixed(3)} (${gapSign}${gapAbsStr} ${gapPhrase} threshold)`}
         />
       </div>
       <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
         <span>z = {lo}</span>
-        <span className="font-mono">
+        <span className="font-mono" title={`Distance from locked threshold: ${gapSign}${gapAbsStr} z-units (${gapPhrase} threshold)`}>
           your z = <strong>{score.toFixed(3)}</strong>
           {" · "}
           threshold = {threshold.toFixed(3)}
+          {" · "}
+          gap = <strong className={isAccepted ? "text-emerald-700 dark:text-emerald-400" : "text-rose-700 dark:text-rose-400"}>{gapSign}{gapAbsStr}</strong>
         </span>
         <span>z = +{hi}</span>
       </div>
@@ -305,25 +324,29 @@ function CalibrationStrip({
   );
 }
 
+// Phase 9.9 — explains the calibration strip's geometry + how to read the gap.
+const CALIBRATION_GAP_HINT =
+  "The strip plots this query's z-scored top-1 similarity (the colored dot) against the locked decision threshold (the vertical line at z ≈ −0.680). Distance from the threshold is the 'gap': positive = the model is confident this person is enrolled; negative = the model is confident they are not. Bigger absolute gap = more decisive call. The threshold was tuned on held-out enrolment data (AUROC 0.832 full / 0.609 rotated); it is NOT re-tuned per query.";
+
 // ---------- Tooltips ----------
 
 const PERCENTILE_HINT =
-  "Only defined for rank #1 — the reference distribution is held-out *rank-1* hits (740 values from Phase 8.6 enrolment). 73% means 'this top-1 similarity is higher than 73% of correct identifications observed during evaluation.' Ranks 2-5 show '—' because they're runners-up, not correct identifications, so applying the same percentile would be a category error.";
+  "Only defined for rank #1 — the reference distribution is the top-1 similarity of every held-out in-registry query from enrolment evaluation (740 values: 608 are correct rank-1 hits, 132 are in-registry queries where the model picked the wrong person). 73% means 'this top-1 similarity is higher than 73% of in-registry top-1 similarities observed during evaluation.' Ranks 2-5 show '—' because they are runners-up against a different reference distribution that we have not characterised.";
 
 const VERDICT_HINT =
-  "Calibrated open-set verdict, using the locked Phase 8.6 threshold (z = −0.680 on z-scored sim_top1). Likely enrolled = passes threshold with margin. Borderline = passes threshold but top-1 vs top-2 gap is in the lower tercile. Probably not enrolled = below threshold; the system thinks the query person is NOT in the registry.";
+  "Calibrated open-set verdict, using the locked decision threshold (z = −0.680 on the z-scored top-1 similarity). Likely enrolled = passes threshold with margin. Borderline = passes threshold but top-1 vs top-2 gap is in the lower tercile. Probably not enrolled = below threshold; the system thinks the query person is NOT in the registry.";
 
 const PROVENANCE_HINT =
-  "Self-match: the uploaded image is byte-identical to an enrolled image (sim ≈ 1.0 is tautological). Novel upload: the bytes don't match any enrolled image. Held-out · OOS: a curated out-of-distribution test image (Phase 9.8). The dataset has one panoramic per person, so 'self-match' and 'enrolled' are the same set here.";
+  "Self-match: the uploaded image is byte-identical to an enrolled image (sim ≈ 1.0 is tautological). Novel upload: the bytes don't match any enrolled image. Held-out · OOS: a curated out-of-distribution test image. The dataset has one panoramic per person, so 'self-match' and 'enrolled' are the same set here.";
 
 const AGE_HINT_CONFIDENT =
-  "Estimated dental age from the Phase 8.10 regression head on the frozen embedder. Pre-registered MAE = 0.93y on the 6-13y dense bucket on GT-mean embeddings; the live demo uses YOLO-mean embeddings (GT→YOLO distribution shift, ~1.8y empirical MAE in smoke testing). CI ±2.5y is conservative — covers the worst observed per-bucket MAE (2.09y in 16-18y) with a buffer. Suppressed when the open-set verdict is 'probably not enrolled' (embedder is out of distribution → head output meaningless). Sex is intentionally NOT shown — the sex head failed at chance (0.556 acc).";
+  "Estimated dental age from a regression head trained on the frozen embedder. Pre-registered MAE = 0.93y on the 6-13y dense bucket on GT-mean embeddings; the live demo uses YOLO-mean embeddings (GT→YOLO distribution shift, ~1.8y empirical MAE in smoke testing). CI ±2.5y is conservative — covers the worst observed per-bucket MAE (2.09y in 16-18y) with a buffer. Suppressed when the open-set verdict is 'probably not enrolled' (embedder is out of distribution → head output meaningless). Sex is intentionally NOT shown — the sex head failed at chance (0.556 acc).";
 
 const AGE_HINT_SATURATED =
   "The prediction is outside the dense 6-13y training bucket or hit the training-range boundary [6, 18]. Outside dense the head is less reliable: 16-18y reported MAE = 2.09y on GT-mean embeddings (regression-ceiling effect — dental development is largely complete by 17). CI widened to ±3.5y. Note: the dense-bucket flag is a *raw-prediction* heuristic, not ground-truth — an adult whose embedding saturates the head to e.g. 10.5y will NOT be marked saturated, so treat any in-bucket estimate as 'best-case under the GT→YOLO shift,' not a guarantee.";
 
 const AGE_HINT_SMALL_POOL =
-  "Pool size < 8 teeth. The age head was trained on per-person mean embeddings (16-tooth pools); 1-4 tooth fragments are an unvalidated pool-size shift on top of the GT→YOLO shift, so the CI is widened to ±4y as a conservative indicative spread (no per-pool-size MAE was measured in Phase 8.10).";
+  "Pool size < 8 teeth. The age head was trained on per-person mean embeddings pooling all of each person's teeth (~33 on average); fragments of fewer than 8 teeth are an unvalidated pool-size shift on top of the GT→YOLO shift, so the CI is widened to ±4y as a conservative indicative spread (no per-pool-size MAE was measured during evaluation).";
 
 // ---------- ResultsCards ----------
 
@@ -394,6 +417,36 @@ export function ResultsCards({ state, onReset, onFragmentResult }: Props) {
               : `Queried with ${state.nQueryTeeth} teeth`}
             {state.nDropped > 0 ? ` · ${state.nDropped} duplicates dropped` : ""}
           </p>
+          {/* Phase 9.9 — inline drop-reasons list. Only renders when
+              dropReasons is populated AND nDropped > 0; if backend payload
+              omits dropped[] (old client/server skew) we fall back to the
+              count above and don't lie about the per-tooth detail. */}
+          {state.nDropped > 0 && state.dropReasons && state.dropReasons.length > 0 && (
+            <details className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              <summary className="cursor-pointer select-none hover:text-slate-700 dark:hover:text-slate-300">
+                Why teeth were dropped
+              </summary>
+              <ul className="mt-1.5 space-y-1 pl-2">
+                {state.dropReasons.map((d, i) => (
+                  <li key={`${d.fdi}-${i}`} className="font-mono">
+                    <span className="text-slate-700 dark:text-slate-300">
+                      FDI {d.fdi}
+                    </span>{" "}
+                    <span className="opacity-80">
+                      ({(d.fdi_confidence * 100).toFixed(0)}%)
+                    </span>{" "}
+                    <span className="opacity-70">— duplicate of higher-confidence</span>
+                    {typeof d.kept_fdi_confidence === "number" && (
+                      <span className="ml-0.5 opacity-80">
+                        {" "}
+                        ({(d.kept_fdi_confidence * 100).toFixed(0)}%)
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
         </div>
         <span
           className={`inline-flex flex-shrink-0 items-center rounded-full px-3 py-1 text-xs font-semibold ${verdict.badge}`}
@@ -500,7 +553,7 @@ export function ResultsCards({ state, onReset, onFragmentResult }: Props) {
                       {r.is_session && (
                         <span
                           className="ml-2 inline-flex items-center rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700 ring-1 ring-inset ring-emerald-500/30 dark:text-emerald-300"
-                          title="From your session enrolments (Phase 9.7). Calibrated percentile / open-set verdict are NOT applied — Phase 8.6 calibration is canonical-only."
+                          title="From your session enrolments. Calibrated percentile / open-set verdict are NOT applied — the locked calibration is canonical-only."
                         >
                           session
                         </span>
@@ -576,7 +629,7 @@ export function ResultsCards({ state, onReset, onFragmentResult }: Props) {
 
           <p className="text-xs text-slate-500 dark:text-slate-400">
             Aggregation: mean pooling · embedder: FDI-init · gallery size: 1,178 persons.
-            Open-set calibration: Phase 8.6 (locked z-threshold).
+            Open-set calibration: locked z-threshold (z = −0.6805).
           </p>
         </div>
       </details>
@@ -615,7 +668,14 @@ function ToothContributions({ contributions }: { contributions: ToothContributio
               <th className="py-1 text-left">FDI</th>
               <th className="py-1 text-right">Similarity → top-1</th>
               <th className="py-1 text-left pl-3">&nbsp;</th>
-              <th className="py-1 text-right">FDI confidence</th>
+              <th className="py-1 text-right">FDI conf.</th>
+              {/* Phase 9.9 — YOLO detection confidence column. */}
+              <th className="py-1 pl-3 text-right">
+                <span className="inline-flex items-center">
+                  YOLO conf.
+                  <InfoHint text={YOLO_CONF_HINT} />
+                </span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -645,6 +705,11 @@ function ToothContributions({ contributions }: { contributions: ToothContributio
                   <td className="py-1 text-right font-mono tabular-nums">
                     {(c.fdi_confidence * 100).toFixed(0)}%
                   </td>
+                  <td className="py-1 pl-3 text-right font-mono tabular-nums">
+                    {typeof c.yolo_confidence === "number"
+                      ? `${(c.yolo_confidence * 100).toFixed(0)}%`
+                      : <span className="opacity-50">—</span>}
+                  </td>
                 </tr>
               );
             })}
@@ -654,3 +719,7 @@ function ToothContributions({ contributions }: { contributions: ToothContributio
     </div>
   );
 }
+
+// Phase 9.9 — tooltip for the YOLO confidence column in the per-tooth table.
+const YOLO_CONF_HINT =
+  "YOLO segmentation/detection score for the tooth box itself (NOT the identification). Higher = the detector is more sure 'this is a tooth.' Em-dash means the crop bypassed YOLO (uploaded as a pre-cropped image).";

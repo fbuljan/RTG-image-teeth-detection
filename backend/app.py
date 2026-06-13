@@ -43,10 +43,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 app = FastAPI(title="Tooth Identification Demo", version="0.1.0")
 
-# Allow the Next.js dev server (default port 3000) to call us.
+# Allow the Next.js dev server (default port 3000, plus 3005 as an alt port
+# used during audits when the canonical 3000 is occupied by another process).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3005",
+        "http://127.0.0.1:3005",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -172,13 +178,57 @@ def _build_model_card() -> dict:
         with open(eval_metrics_path) as f:
             card["eval_test"] = json.load(f)
 
+    # Multi-tooth sweep — DEPLOYED pipeline (Phase 8.0 YOLO-built registry).
+    # Headline R1 @ n=16 = 82.6% [79.8, 86.0]. This is the same artefact the
+    # deployment headline tooltip cites, so the on-page table is internally
+    # consistent. The legacy Phase 5 single-model GT-crop sweep (which used
+    # to power this table) reported 55.1% — superseded by the YOLO-built
+    # registry rebuild; preserved on disk under
+    # `embedding_fdi_init_v1/analysis/person_retrieval/metrics.json` for the
+    # GT-only ensemble comparison block (loaded separately below as the
+    # offline ensemble vs single-model anchor).
+    deployed_sweep_path = (
+        PROJECT_ROOT
+        / "identification/runs/phase8_deployed_yolo_reg/yolo_eval.json"
+    )
+    if deployed_sweep_path.exists():
+        with open(deployed_sweep_path) as f:
+            deployed = json.load(f)
+        # Normalize the deployed-sweep schema to match what the frontend
+        # SweepEntry type expects (rank1_mean/rank5_mean/rank10_mean +
+        # method tag). The deployed artefact omits mAP — fmtPct renders an
+        # em-dash for null cells, which is honest: mAP wasn't measured in
+        # this sweep protocol.
+        sweep = []
+        for row in sorted(deployed.get("sweep_full_registry", []), key=lambda r: r["n_query"]):
+            sweep.append({
+                "n_query": row["n_query"],
+                "method": "mean",  # mean-pool aggregation; matches frontend filter
+                "n_persons": row.get("n_persons"),
+                "n_trials": row.get("n_trials"),
+                "rank1_mean": row.get("rank1_mean"),
+                "rank1_std": None,  # deployed artefact uses bootstrap CI instead
+                "rank1_ci95_low": row.get("rank1_ci95_low"),
+                "rank1_ci95_high": row.get("rank1_ci95_high"),
+                "rank5_mean": row.get("rank5_mean"),
+                "rank5_std": None,
+                "rank10_mean": row.get("rank10_mean"),
+                "rank10_std": None,
+                "mAP_mean": None,  # not measured in deployed sweep protocol
+                "mAP_std": None,
+            })
+        card["multi_tooth_sweep"] = sweep
+
+    # The legacy Phase 5 GT-crop single-model sweep is still loaded as a
+    # comparator for the offline GT ensemble block (EnsembleSweepTable's
+    # "Single R-1" column). It does NOT drive the headline multi-tooth
+    # block above — that's now the deployed YOLO-built-registry numbers.
     if person_retrieval_path.exists():
         with open(person_retrieval_path) as f:
             payload = json.load(f)
-        # Trim to mean-pooling sweep entries (the headline thesis result).
-        sweep = [s for s in payload.get("sweep", []) if s.get("method") == "mean"]
-        sweep.sort(key=lambda s: s["n_query"])
-        card["multi_tooth_sweep"] = sweep
+        legacy_sweep = [s for s in payload.get("sweep", []) if s.get("method") == "mean"]
+        legacy_sweep.sort(key=lambda s: s["n_query"])
+        card["multi_tooth_sweep_gt_anchor"] = legacy_sweep
         # Forensic 1-vs-aggregated, mean gallery only.
         forensic = [
             f for f in payload.get("forensic_1tooth", [])

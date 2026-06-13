@@ -39,10 +39,26 @@ export type OpenSetDecision = "in_registry" | "rejected" | "unknown";
 // "unknown"     — could not classify (filesystem error etc.).
 export type QueryProvenance = "self_match" | "novel" | "heldout" | "unknown";
 
+// Phase 9.9 — embed-stage progress events now carry the FDI labels +
+// confidences of teeth just embedded, so the UI can show "13, 12, 11…" live
+// instead of an opaque counter.
+export type EmbedProgressItem = {
+  fdi: string;
+  fdi_confidence: number;
+};
+
 export type StageEvent =
   | { event: "stage_start"; data: { stage: string; message: string; total?: number } }
   | { event: "stage_complete"; data: StageCompleteData }
-  | { event: "progress"; data: { stage: string; current: number; total: number } }
+  | {
+      event: "progress";
+      data: {
+        stage: string;
+        current: number;
+        total: number;
+        embedded?: EmbedProgressItem[];
+      };
+    }
   | { event: "warning"; data: { code: string; message: string } }
   | { event: "error"; data: { message: string } }
   | { event: "done"; data: Record<string, unknown> };
@@ -50,7 +66,22 @@ export type StageEvent =
 export type ToothContribution = {
   fdi: string;
   fdi_confidence: number;
+  // Phase 9.9 — null for the crops path (no YOLO) and for cached fragment
+  // queries written before the cache schema was widened; UI renders em-dash.
+  yolo_confidence?: number | null;
   similarity_to_top1: number;
+};
+
+// Phase 9.9 — structured drop record (one entry per tooth lost to FDI dedup).
+// Replaces the bare `n_dropped` count on the search-stage payload while
+// preserving the count for compact summaries.
+export type DropReason = {
+  fdi: string;
+  reason: "duplicate";
+  fdi_confidence: number;
+  yolo_confidence: number | null;
+  kept_index: number | null;
+  kept_fdi_confidence: number | null;
 };
 
 export type StageCompleteData = {
@@ -58,6 +89,9 @@ export type StageCompleteData = {
   n_teeth?: number;
   n_uncertain?: number;
   n_dropped?: number;
+  // Phase 9.9 — structured drop list (added on `fdi` and `search` stage_complete
+  // events; absent on others).
+  dropped?: DropReason[];
   n_embeddings?: number;
   annotated_image_url?: string;
   results?: SearchResult[];
@@ -127,6 +161,9 @@ export type PerTooth = {
   index: number;
   fdi: string;
   fdi_confidence: number;
+  // Phase 9.9 — surfaced in the technical-details per-tooth table. Optional
+  // for back-compat with the crops path (no YOLO involved).
+  yolo_confidence?: number | null;
   bbox: [number, number, number, number];
 };
 
