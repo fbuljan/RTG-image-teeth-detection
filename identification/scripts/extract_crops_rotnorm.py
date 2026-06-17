@@ -1,4 +1,4 @@
-"""Extract rotation-canonicalised tooth crops from dataset_raw/ for Phase 8.1.
+"""Extract rotation-canonicalised tooth crops from dataset_raw/.
 
 Mirrors extract_crops_gt.py but rotates each tooth so its principal axis (the
 longer side of the polygon's minimum-area rectangle) is VERTICAL. The
@@ -99,7 +99,7 @@ def canonical_rotation_deg(
     ], axis=1)
 
     # --- HIGH #2 fix: arch convention for the 180° decision (always when
-    # panoramic_h is known). Empirically (audit's parity test on Phase 8.0
+    # panoramic_h is known). Empirically (audit's parity test on the baseline
     # YOLO+GT polygons) using the arch convention always — rather than only as
     # a fallback when half-area is ambiguous — reduces the GT-vs-YOLO
     # disagreement rate at |Δrot|>90° from 16% to 6.7%, and at |Δrot|>170°

@@ -1,5 +1,5 @@
 """
-Phase 8.10 — Demographic prediction (sex + age) on the frozen deployed embedder.
+Demographic prediction (sex + age) on the frozen deployed embedder.
 
 Trains two heads on top of the deployed FDI-init embedder's GT-built registry
 (per-person mean-pooled 128-d embeddings, L2-normalised):
@@ -8,10 +8,9 @@ Trains two heads on top of the deployed FDI-init embedder's GT-built registry
   2. Age regressor: 2-layer MLP (Huber loss, MAE evaluation).
 
 Person-disjoint train/val/test split is inherited from the manifest (the same
-split used for all Phase 8 evaluation).
+split used for all retrieval evaluation).
 
-Pre-registered Pass criterion (from `identification/docs/phase8_final_plan.md`
-§Phase 8.10):
+Pre-registered Pass criterion:
 
   PASS (wire into demo) — both must hold on test:
     - Sex accuracy ≥ 80% on held-out persons
@@ -373,7 +372,7 @@ def plot_age_scatter(targets: np.ndarray, preds: np.ndarray, out_path: Path) -> 
     ax.set_ylim(lo, hi)
     ax.set_xlabel("True age (years)")
     ax.set_ylabel("Predicted age (years)")
-    ax.set_title("Phase 8.10 — Age prediction on test set\n"
+    ax.set_title("Age prediction on test set\n"
                  f"MAE = {float(np.abs(preds - targets).mean()):.2f}y (full range)")
     ax.legend()
     ax.grid(True, alpha=0.3)
@@ -429,21 +428,21 @@ def main() -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
 
-    print(f"[phase8.10] registry: {args.registry}")
-    print(f"[phase8.10] manifest: {args.manifest}")
-    print(f"[phase8.10] seed:     {args.seed}")
+    print(f"[demographic] registry: {args.registry}")
+    print(f"[demographic] manifest: {args.manifest}")
+    print(f"[demographic] seed:     {args.seed}")
     print()
 
     embeddings, meta = load_per_person_data(args.registry, args.manifest)
-    print(f"[phase8.10] loaded {len(embeddings)} person-mean embeddings from registry")
+    print(f"[demographic] loaded {len(embeddings)} person-mean embeddings from registry")
 
     X_tr, ys_tr, ya_tr, pids_tr = assemble_split(embeddings, meta, "train")
     X_va, ys_va, ya_va, pids_va = assemble_split(embeddings, meta, "val")
     X_te, ys_te, ya_te, pids_te = assemble_split(embeddings, meta, "test")
-    print(f"[phase8.10] splits: train={len(pids_tr)}, val={len(pids_va)}, test={len(pids_te)}")
-    print(f"[phase8.10] train sex chance baseline (female share): {ys_tr.mean():.3f}")
-    print(f"[phase8.10] test  sex chance baseline (female share): {ys_te.mean():.3f}")
-    print(f"[phase8.10] test age dense bucket (6-13y) n: {int(((ya_te >= 6) & (ya_te < 13)).sum())}")
+    print(f"[demographic] splits: train={len(pids_tr)}, val={len(pids_va)}, test={len(pids_te)}")
+    print(f"[demographic] train sex chance baseline (female share): {ys_tr.mean():.3f}")
+    print(f"[demographic] test  sex chance baseline (female share): {ys_te.mean():.3f}")
+    print(f"[demographic] test age dense bucket (6-13y) n: {int(((ya_te >= 6) & (ya_te < 13)).sum())}")
     print()
 
     X_tr_t = torch.from_numpy(X_tr)
@@ -451,7 +450,7 @@ def main() -> int:
     X_te_t = torch.from_numpy(X_te)
 
     # --- Sex ---
-    print("[phase8.10] training sex head...")
+    print("[demographic] training sex head...")
     ys_tr_t = torch.from_numpy(ys_tr)
     ys_va_t = torch.from_numpy(ys_va)
     ys_te_t = torch.from_numpy(ys_te)
@@ -470,7 +469,7 @@ def main() -> int:
     print()
 
     # --- Age ---
-    print("[phase8.10] training age head...")
+    print("[demographic] training age head...")
     ya_tr_t = torch.from_numpy(ya_tr)
     ya_va_t = torch.from_numpy(ya_va)
     ya_te_t = torch.from_numpy(ya_te)
@@ -491,7 +490,7 @@ def main() -> int:
     # --- Verdict ---
     v_label, v_text = verdict(sex_result["test_acc"], age_result["test_mae_dense_6_13"],
                               sex_result["max_min_bucket_spread"])
-    print(f"[phase8.10] === VERDICT: {v_label} ===")
+    print(f"[demographic] === VERDICT: {v_label} ===")
     print(f"  {v_text}")
     print()
     print("  Per-age bucket (sex acc):")
@@ -536,17 +535,17 @@ def main() -> int:
     out_json = args.out_dir / "results.json"
     with open(out_json, "w") as f:
         json.dump(out, f, indent=2)
-    print(f"\n[phase8.10] wrote {out_json}")
+    print(f"\n[demographic] wrote {out_json}")
 
     # Save model weights
     torch.save(sex_model.state_dict(), args.out_dir / "sex_head.pt")
     torch.save(age_model.state_dict(), args.out_dir / "age_head.pt")
-    print(f"[phase8.10] wrote sex_head.pt + age_head.pt")
+    print(f"[demographic] wrote sex_head.pt + age_head.pt")
 
     # Age scatter plot
     plot_age_scatter(np.array(age_result["targets"]), np.array(age_result["preds"]),
                      args.out_dir / "age_scatter.png")
-    print(f"[phase8.10] wrote age_scatter.png")
+    print(f"[demographic] wrote age_scatter.png")
 
     return 0
 

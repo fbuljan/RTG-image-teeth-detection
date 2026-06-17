@@ -1,10 +1,10 @@
-# Phase 8.4 — FDI-init embedder with multi-task FDI classification auxiliary head.
+# FDI-init embedder with multi-task FDI classification auxiliary head.
 # Identical to configs/embedding_fdi_init.yaml (deployed embedder) except:
 # - aux_loss section enables an FDI classification head fed by the same
 #   post-dropout 512-d features that the projection head sees. lambda=0.1
 #   keeps the aux gradient as a gentle regulariser rather than a co-equal
 #   objective (design-review-recommended starting point).
-# - augmentations unchanged from deployed defaults (NO 8.2 scale jitter).
+# - augmentations unchanged from deployed defaults (no scale jitter).
 # - killswitch section aborts training at epoch 20 if the experiment is
 #   clearly failing (val_rank1 < deployed-0.0969, aux FDI val acc < 0.88, or
 #   the aux loss is dominating triplet).
@@ -45,7 +45,7 @@ miner:
   type: multi_similarity
   epsilon: 0.1
 
-# Phase 8.4 multi-task auxiliary loss
+# Multi-task auxiliary loss
 aux_loss:
   type: fdi
   lambda: 0.1

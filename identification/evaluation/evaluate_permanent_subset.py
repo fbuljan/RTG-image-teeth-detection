@@ -1,14 +1,14 @@
 """
-Phase 8.9 — Adult-deployment-gap subset eval (post-hoc).
+Adult-deployment-gap subset eval (post-hoc).
 
-Re-aggregates the canonical 8.0 baseline run (`phase8_deployed_yolo_reg/yolo_eval.json`)
+Re-aggregates the canonical baseline run (`phase8_deployed_yolo_reg/yolo_eval.json`)
 across pre-registered subsets to quantify the pediatric→adult deployment gap:
 
   1. all-permanent test PIDs (zero deciduous teeth in YOLO detection)
   2. per-age-bucket R1 within the 6-18y range
   3. per-sex R1 (descriptive, for the Discussion chapter)
 
-Pre-registered honesty rule (from phase8_final_plan.md §Phase 8.9):
+Pre-registered honesty rule:
   If the all-permanent subset R1 collapses by ≥10pp vs full-test R1, the abstract
   and introduction must say so. (The actual outcome may go either way.)
 
@@ -147,7 +147,7 @@ def plot_age_buckets(
     ax.set_xticklabels([f"{r['label']}\nn={r['n']}" for r in rows], fontsize=9)
     ax.set_ylabel("Person retrieval R1 @ n=16 (full-reg, deployment-aligned)")
     ax.set_ylim(0, 1.05)
-    ax.set_title("Phase 8.9 — Per-age-bucket R1 with person-bootstrap 95% CI")
+    ax.set_title("Per-age-bucket R1 with person-bootstrap 95% CI")
     ax.legend(loc="lower right")
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
@@ -176,15 +176,15 @@ def main() -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
 
-    print(f"[phase8.9] baseline:  {args.baseline}")
-    print(f"[phase8.9] stage_ac:  {args.stage_ac}")
-    print(f"[phase8.9] manifest:  {args.manifest}")
-    print(f"[phase8.9] seed:      {args.seed}")
+    print(f"[subset] baseline:  {args.baseline}")
+    print(f"[subset] stage_ac:  {args.stage_ac}")
+    print(f"[subset] manifest:  {args.manifest}")
+    print(f"[subset] seed:      {args.seed}")
     print()
 
     pids, r1 = load_baseline_per_person_r1(args.baseline)
-    print(f"[phase8.9] loaded {len(pids)} test PIDs with n>=16 detected teeth from baseline JSON")
-    print(f"[phase8.9] full-test R1 (n=16) = {r1.mean():.4f}  (sanity-check against 82.6% headline)")
+    print(f"[subset] loaded {len(pids)} test PIDs with n>=16 detected teeth from baseline JSON")
+    print(f"[subset] full-test R1 (n=16) = {r1.mean():.4f}  (sanity-check against 82.6% headline)")
 
     meta = load_test_metadata(args.manifest)
     yolo_fdis = load_yolo_fdis(args.stage_ac)
@@ -269,14 +269,14 @@ def main() -> int:
     out_json = args.out_dir / "subset_eval.json"
     with open(out_json, "w") as f:
         json.dump(result, f, indent=2)
-    print(f"[phase8.9] wrote {out_json}")
+    print(f"[subset] wrote {out_json}")
 
     out_png = args.out_dir / "age_buckets.png"
     plot_age_buckets(age_rows, full_test["r1_mean"], out_png)
-    print(f"[phase8.9] wrote {out_png}")
+    print(f"[subset] wrote {out_png}")
 
     print()
-    print(f"[phase8.9] === results ===")
+    print(f"[subset] === results ===")
     print(f"  full-test      : n={full_test['n']:>3}  R1={full_test['r1_mean']:.4f} "
           f"[{full_test['r1_ci_low']:.3f}, {full_test['r1_ci_high']:.3f}]")
     print(f"  all-permanent  : n={all_permanent['n']:>3}  R1={all_permanent['r1_mean']:.4f} "
@@ -295,7 +295,7 @@ def main() -> int:
         print(f"    {r['label']:>6}: n={r['n']:>3}  R1={r['r1_mean']:.4f} "
               f"[{r['r1_ci_low']:.3f}, {r['r1_ci_high']:.3f}]")
     print()
-    print(f"[phase8.9] HONESTY VERDICT: {verdict}")
+    print(f"[subset] HONESTY VERDICT: {verdict}")
     print(f"  {verdict_text}")
     return 0
 

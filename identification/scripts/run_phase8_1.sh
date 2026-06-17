@@ -1,12 +1,12 @@
 #!/bin/bash
-# Phase 8.1 orchestrator: rebuild manifest → train FDI cls → train embedder → build registry → evaluate.
+# Rotnorm orchestrator: rebuild manifest → train FDI cls → train embedder → build registry → evaluate.
 # Run from repo root. Assumes identification/data/crops_gt_rotnorm/ already exists.
 
 set -euo pipefail
 
 PY=/opt/homebrew/Caskroom/miniforge/base/envs/rtg/bin/python
 
-# Allow --skip-to-step to resume from a specific 8.1x step (e.g. after a non-training failure).
+# Allow --skip-to-step to resume from a specific step (e.g. after a non-training failure).
 SKIP_TO="${SKIP_TO:-}"
 should_run() {
   if [ -z "$SKIP_TO" ]; then return 0; fi
@@ -82,7 +82,7 @@ fi
 
 if should_run 8.1f; then
 echo
-echo "=== 8.1f: re-run Phase 8.0 evaluation against the rotnorm embedder ==="
+echo "=== 8.1f: re-run baseline evaluation against the rotnorm embedder ==="
 $PY -u -m identification.evaluation.evaluate_pipeline_rotnorm \
   --embedder identification/runs/embedding_fdi_init_rotnorm_v1/best.pt \
   --registry-dir identification/registry_rotnorm \
@@ -94,4 +94,4 @@ $PY -u -m identification.evaluation.evaluate_pipeline_rotnorm \
 fi
 
 echo
-echo "=== Phase 8.1 done. ==="
+echo "=== Rotnorm pipeline done. ==="

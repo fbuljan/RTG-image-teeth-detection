@@ -1,10 +1,11 @@
-# Phase 8.2a — FDI-init embedder retrained with bbox-jitter augmentation.
+# FDI-init embedder retrained with bbox-jitter augmentation.
 # Identical to configs/embedding_fdi_init.yaml (the deployed embedder's config) except:
 # - augmentation.translate bumped 0.05 -> 0.08
 # - augmentation.scale (NEW) = [0.85, 1.15], enabling the RandomAffine isotropic scale
 #   channel (simulates YOLO drawing a tighter or looser bbox than GT)
-# - rotation_degrees bumped 10 -> 12 (modest, well below the Phase 8.1 +-20 deg level
-#   that failed) -- rotation is included only because RandomAffine bundles it
+# - rotation_degrees bumped 10 -> 12 (modest; stays well below the ±20° level
+#   that the rotnorm experiment showed to be unstable) — rotation is included only
+#   because RandomAffine bundles it
 # - new output dir + experiment name
 #
 # Crops are unchanged (identification/data/crops_gt/, 10% padding, letterboxed).

@@ -1,9 +1,9 @@
 """
-Phase 8.5 — TEST-time evaluation of confidence-weighted aggregation.
+TEST-time evaluation of confidence-weighted aggregation.
 
 This script applies a fitted ``WeightConfig`` (from
-``identification/runs/phase8_weighted/weight_config.json``) to the cached test
-Stage A/C payloads and per-image embeddings produced by Phase 8.0
+``identification/runs/phase8_weighted/weight_config.json``) to cached test
+Stage A/C payloads and per-image embeddings produced by the baseline pipeline
 (``identification/runs/phase8_baseline/cache/``). It reports R1/R5/R10 with
 bootstrap CIs for two regimes that mirror ``evaluate_pipeline.py``:
 
@@ -17,16 +17,16 @@ bootstrap CIs for two regimes that mirror ``evaluate_pipeline.py``:
 
 CRITICAL: this v1 of the script is the cheap *asymmetric* probe. The query
 side is aggregated with the new weighted formula but the registry is left as
-the deployed mean-pool registry. The Phase 8.5 design-review warned that this
-creates a distribution mismatch and the symmetric re-aggregation is required
-before declaring a pass. The script logs this fact prominently.
+the deployed mean-pool registry. The design review warned that this creates a
+distribution mismatch and the symmetric re-aggregation is required before
+declaring a pass. The script logs this fact prominently.
 
 To support the pre-registered paired-bootstrap criterion (3), the same
 permutations + bootstrap seed are used to evaluate the MEAN-POOL baseline on
 the very same persons. The result is written to ``paired_delta_vs_mean.json``.
 
 Outputs (under ``--output-dir``):
-  - ``yolo_eval.json``              (same shape as Phase 8.0 yolo_eval.json)
+  - ``yolo_eval.json``              (same shape as the baseline yolo_eval.json)
   - ``mean_pool_eval.json``         (paired comparator)
   - ``paired_delta_vs_mean.json``   (Δ R1 with bootstrap CI per n_query)
 
@@ -638,15 +638,15 @@ def main():
           f"[p10={sparsity['p10']:.1f}, p90={sparsity['p90']:.1f}]  n={sparsity['n']}")
     print(f"  mean:     median={sparsity_mean['median']:.1f}  (sanity: should ≈ teeth/person)")
 
-    # --- Write yolo_eval.json (weighted, same shape as Phase 8.0) ---
+    # --- Write yolo_eval.json (weighted, same shape as the baseline) ---
     elapsed = time.perf_counter() - t0
     weighted_payload = {
-        "label": "phase8.5_weighted_eval",
+        "label": "weighted_aggregation_eval",
         "rotation_deg": 0.0,
         "asymmetric_registry": True,
         "asymmetric_registry_note": (
             "Registry is mean-pool; only the QUERY side uses weighted aggregation. "
-            "Per Phase 8.5 design-review, a symmetric re-aggregation of the "
+            "Per the design review, a symmetric re-aggregation of the "
             "registry is required before the pre-registered pass criteria can "
             "be evaluated. This file is the cheap first-cut probe."
         ),
@@ -678,7 +678,7 @@ def main():
 
     # --- Write mean_pool_eval.json (comparator, same shape) ---
     mean_payload = {
-        "label": "phase8.5_mean_pool_comparator",
+        "label": "mean_pool_comparator",
         "rotation_deg": 0.0,
         "n_persons_usable": len(persons),
         "embedder_hash": embedder_hash,
@@ -702,7 +702,7 @@ def main():
 
     # --- Write paired_delta_vs_mean.json ---
     paired_payload = {
-        "label": "phase8.5_paired_delta",
+        "label": "weighted_aggregation_paired_delta",
         "n_persons_usable": len(persons),
         "weight_config_path": str(weight_cfg_path.relative_to(PROJECT_ROOT)),
         "registry_source": args.registry_source if not args.skip_full_registry else None,
@@ -753,7 +753,7 @@ def main():
     print(f"\n[!] ASYMMETRIC REGISTRY: the full-registry numbers above are the "
           f"cheap first-cut probe; the deployed registry was built with "
           f"mean-pool. A symmetric re-aggregation is required before the "
-          f"Phase 8.5 pre-registered criteria can be evaluated.")
+          f"weighted-aggregation pre-registered criteria can be evaluated.")
 
 
 if __name__ == "__main__":

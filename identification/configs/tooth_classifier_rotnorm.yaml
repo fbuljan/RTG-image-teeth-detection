@@ -1,4 +1,4 @@
-# Phase 8.1 — FDI classifier retrained on rotation-canonicalised crops.
+# FDI classifier retrained on rotation-canonicalised crops.
 # Mirrors configs/tooth_classifier.yaml with: manifest swapped to manifest_clean_rotnorm.csv,
 # rotation_degrees bumped to 20, output dir renamed.
 experiment_name: tooth_fdi_rotnorm

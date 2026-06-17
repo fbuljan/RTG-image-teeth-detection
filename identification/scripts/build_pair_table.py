@@ -1,5 +1,5 @@
 """
-Build identification/data/pair_table_train.csv for Phase 8.3.
+Build identification/data/pair_table_train.csv for the GT/YOLO blend training run.
 
 For each (image_id, tooth_fdi) train pair that exists in both manifest_yolo.csv
 and manifest_clean.csv, compute the YOLO predicted-polygon vs GT red-mask IoU

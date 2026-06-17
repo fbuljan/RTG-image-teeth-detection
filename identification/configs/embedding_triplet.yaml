@@ -1,4 +1,4 @@
-# Phase 3: Embedding model with triplet loss + online mining
+# Embedding model with triplet loss + online mining
 experiment_name: embedding_triplet_v1
 
 data:

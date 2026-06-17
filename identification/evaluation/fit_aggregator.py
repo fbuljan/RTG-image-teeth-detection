@@ -1,5 +1,5 @@
 """
-Phase 8.5 — fit confidence-weighted-aggregation hyperparameters on the val cache.
+Fit confidence-weighted-aggregation hyperparameters on the val cache.
 
 Protocol (per design-review synthesis):
   1. Load val Stage A/C cache + cached embeddings (one entry per val person, upright)
@@ -246,7 +246,7 @@ def grid_search(
     # Stage 2: per-FDI prior
     # Compute a per-FDI rank1 prior from val: for each FDI, train R1 of single-tooth queries
     # As a proxy, use the relative frequency of that FDI's appearance in winning matches.
-    # Simpler: load per_fdi_metrics.csv from the deployed embedder's analysis (Phase 4 output).
+    # Simpler: load per_fdi_metrics.csv from the deployed embedder's analysis output.
     per_fdi_csv = PROJECT_ROOT / "identification/runs/embedding_fdi_init_v1/analysis/per_tooth/per_fdi_metrics.csv"
     fdi_rank1_prior: Dict[str, float] = {}
     if per_fdi_csv.exists():

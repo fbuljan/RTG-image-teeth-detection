@@ -1,4 +1,4 @@
-"""Phase 7.1 — score-level ensemble of all four trained embedders.
+"""Score-level ensemble of all four trained embedders.
 
 For each of the four embedders (raw / masked / metadata / FDI-init), extract
 embeddings on the eval split, then run the standard symmetric multi-tooth

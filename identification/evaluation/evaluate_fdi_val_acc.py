@@ -1,9 +1,9 @@
 """Evaluate an FDI classifier checkpoint on the val split of a given manifest.
 
-Phase 8.1 pass criterion includes: rotnorm FDI classifier val acc within 1pp
-of the deployed FDI classifier (baseline ~95%). Run this once for the rotnorm
-classifier on the rotnorm manifest, and emit a JSON the rotnorm evaluator can
-cross-check before declaring 8.1 a pass.
+The rotnorm pass criterion requires the rotnorm FDI classifier val acc to be
+within 1pp of the deployed FDI classifier (baseline ~95%). Run this once for
+the rotnorm classifier on the rotnorm manifest, and emit a JSON the rotnorm
+evaluator can cross-check before declaring the rotnorm run a pass.
 """
 
 from __future__ import annotations
@@ -103,10 +103,10 @@ def main() -> None:
         baseline_result = evaluate(bp, bm, split=args.split)
         delta = result["val_accuracy"] - baseline_result["val_accuracy"]
         print(f"Baseline val accuracy: {baseline_result['val_accuracy']:.4f}")
-        print(f"Delta: {delta:+.4f}  (Phase 8.1 pre-registered threshold: within ±0.01)")
+        print(f"Delta: {delta:+.4f}  (pre-registered threshold: within ±0.01)")
         result["baseline"] = baseline_result
         result["delta_vs_baseline"] = delta
-        result["passes_phase8_1_criterion"] = bool(abs(delta) <= 0.01)
+        result["passes_rotnorm_criterion"] = bool(abs(delta) <= 0.01)
 
     if args.output:
         out = (PROJECT_ROOT / args.output).resolve()

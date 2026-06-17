@@ -1,21 +1,21 @@
 """
-Phase 8.6 — Open-set detection (post-hoc consumer of heldout_enrol JSON).
+Open-set detection (post-hoc consumer of heldout_enrol JSON).
 
-Pre-registered protocol (see identification/docs/phase8_final_plan.md §Phase 8.6):
+Pre-registered protocol:
 
 1. Read val heldout records (calibration source); read test heldout records (immutable
    evaluation target); optionally read test rotated heldout records (adversarial slice).
 2. Compute five open-set features per record: sim_top1, gap_top12, mean_top5_sim,
-   gap_top1_vs_mean5, vote_consistency. The last three were added to the
-   heldout_enrol record schema in Phase 8.6; older records that lack them are rejected
-   here with a clear error.
+   gap_top1_vs_mean5, vote_consistency. Records lacking the top-5 features (an older
+   schema) are rejected here with a clear error.
 3. Z-score features using val in-registry mean/std ONLY (val + in_registry subset).
    Persist (mean, std) per feature.
 4. Calibration on val:
      a. Fit L2-regularised logistic regression on z-scored features.
      b. Compute val-CV AUROC via person-stratified bootstrap.
      c. Fallback: if val-CV AUROC(5-feature LR) < val-CV AUROC(sim_top1 only) + 0.03,
-        lock score to sim_top1 only (no weights). Mirrors Phase 8.5 weight-collapse defence.
+        lock score to sim_top1 only (no weights). Mirrors the weighted-aggregation
+        weight-collapse defence.
      d. Pick operating-point threshold giving ≥70% OOS rejection on val.
 5. Lock weights + threshold + z-score stats to <out_dir>/phase8_open_set_calibration.json.
 6. Test evaluation:
@@ -64,7 +64,7 @@ FEATURE_NAMES = [
     "vote_consistency",
 ]
 
-# Pre-registered thresholds (see identification/docs/phase8_final_plan.md §Phase 8.6)
+# Pre-registered thresholds
 PASS_CLEAN_AUROC = 0.72
 PASS_ROTATED_AUROC = 0.60
 WEAK_POSITIVE_FLOOR = 0.65
@@ -83,8 +83,8 @@ def _load_records(path: Path) -> list[dict]:
     missing = [f for f in FEATURE_NAMES if f not in records[0]]
     if missing:
         raise RuntimeError(
-            f"{path} is missing required Phase 8.6 features: {missing}. "
-            f"Re-run evaluate_pipeline.py (post-Phase-8.6 schema includes top-5 features)."
+            f"{path} is missing required open-set features: {missing}. "
+            f"Re-run evaluate_pipeline.py (current schema includes top-5 features)."
         )
     return records
 
@@ -335,7 +335,7 @@ def plot_roc(records_by_label: dict[str, list[dict]], calibration: dict, out_pat
     ax.plot([0, 1], [0, 1], "k--", alpha=0.3)
     ax.set_xlabel("False positive rate (in_registry queries incorrectly rejected)")
     ax.set_ylabel("True positive rate (OOS queries correctly rejected)")
-    ax.set_title("Phase 8.6 — Open-set detection ROC")
+    ax.set_title("Open-set detection ROC")
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()

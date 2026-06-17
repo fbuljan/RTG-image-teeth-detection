@@ -187,7 +187,7 @@ def write_summary_md(same_df, baseline_metrics, output_path):
     lines.append("Note: Within-FDI retrieval is not well-defined because each person\n")
     lines.append("contributes at most 1 tooth per FDI in our dataset.\n")
 
-    lines.append("## Baseline (all queries, from Phase 3)\n")
+    lines.append("## Baseline (all queries, full-gallery retrieval)\n")
     lines.append(f"- Rank-1: {baseline_metrics['rank1']:.4f}")
     lines.append(f"- AUC: {baseline_metrics['auc']:.4f}")
     lines.append(f"- mAP: {baseline_metrics['mAP']:.4f}\n")

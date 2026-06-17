@@ -1,4 +1,4 @@
-# Phase 8.1 — FDI-init embedder retrained on rotation-canonicalised crops.
+# FDI-init embedder retrained on rotation-canonicalised crops.
 # Mirrors configs/embedding_fdi_init.yaml (the deployed embedder's config) with:
 # - manifest swapped to manifest_clean_rotnorm.csv
 # - init_from_classifier swapped to the rotnorm-retrained FDI classifier

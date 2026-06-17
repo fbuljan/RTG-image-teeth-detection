@@ -3,7 +3,7 @@ Tooth embedding model for metric learning.
 
 ResNet-18 backbone with projection head producing L2-normalized embeddings.
 Reuses backbone pattern from classifier.py. Backbone/head separation
-enables Phase 4 metadata fusion.
+enables metadata-fusion variants.
 """
 
 import torch
@@ -21,7 +21,7 @@ class ToothEmbeddingModel(nn.Module):
         pretrained: Use ImageNet pretrained weights.
         dropout: Dropout rate before projection head.
         num_fdi_classes: If set, adds a parallel FDI classification head fed by
-            the same post-dropout 512-d features (Phase 8.4 multi-task aux loss).
+            the same post-dropout 512-d features (multi-task aux loss).
             When set, forward() returns (embeddings, fdi_logits). Backwards
             compatible: default None preserves the single-output forward.
     """
@@ -41,9 +41,9 @@ class ToothEmbeddingModel(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
         self.projection_head = nn.Linear(self.feature_dim, embedding_dim)
-        # Phase 8.4: optional FDI auxiliary classification head. Fed POST-dropout
-        # to share stochastic feature subspace with the projection head (forces
-        # joint regularisation; design-review recommendation).
+        # Optional FDI auxiliary classification head. Fed POST-dropout so it
+        # shares the stochastic feature subspace with the projection head (forces
+        # joint regularisation).
         self.fdi_head: nn.Linear | None = (
             nn.Linear(self.feature_dim, num_fdi_classes)
             if num_fdi_classes is not None

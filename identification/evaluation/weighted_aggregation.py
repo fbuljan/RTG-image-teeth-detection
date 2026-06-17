@@ -1,5 +1,5 @@
 """
-Phase 8.5 — confidence-weighted aggregation.
+Confidence-weighted aggregation.
 
 Post-hoc weighted aggregation of per-tooth embeddings using a learned softmax
 over per-tooth feature scores. The deployed embedder is unchanged; only the
@@ -240,7 +240,7 @@ def effective_n_teeth(features: PerToothFeatures, cfg: WeightConfig) -> float:
     """Effective number of teeth contributing to the pool, per Shannon-style guard.
 
     For uniform weights w_i = 1/T, returns T. For one-hot weights, returns 1.
-    Used as a sparsity guard (Phase 8.5 pre-registered criterion #5).
+    Used as a sparsity guard (pre-registered weighted-aggregation criterion #5).
     """
     if features.n_teeth == 0:
         return 0.0

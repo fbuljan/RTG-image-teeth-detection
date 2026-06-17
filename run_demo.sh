@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boot the Phase 6 dental identification demo.
+# Boot the dental identification demo.
 #
 # Starts the FastAPI backend (port 8000) and the Next.js frontend (port 3000)
 # in two background processes, prints their PIDs, and waits for Ctrl+C.

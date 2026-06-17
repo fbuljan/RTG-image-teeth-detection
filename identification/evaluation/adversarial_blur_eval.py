@@ -1,5 +1,5 @@
 """
-Phase 8.5 — adversarial blur stress test.
+Adversarial blur stress test.
 
 For each K in {1, 3, 5}, two corruption slices:
   (a) "blur random K teeth"        — pick K teeth uniformly at random per person

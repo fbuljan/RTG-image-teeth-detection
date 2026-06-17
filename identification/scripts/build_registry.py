@@ -1,4 +1,4 @@
-"""Build the full-dataset retrieval registry for the Phase 6 demo.
+"""Build the full-dataset retrieval registry for the demo.
 
 Embeds every tooth across all splits (train + val + test) using the chosen
 embedding checkpoint, mean-pools per person, and saves:
@@ -9,7 +9,7 @@ embedding checkpoint, mean-pools per person, and saves:
     registry_meta.json       # list of {person_id, fake_name, n_teeth, image_id, panoramic_path, faiss_idx}
 
 Default checkpoint is the FDI-init embedder (best multi-tooth aggregation
-performance from Phase 5).
+performance).
 
 Usage:
     python -m identification.scripts.build_registry
@@ -46,7 +46,7 @@ def build_full_dataset(cfg, label_map, ckpt, uses_metadata, manifest_override=No
     """ToothDataset spanning every split — full registry coverage.
 
     `manifest_override` lets the caller swap in a different manifest (e.g. the
-    YOLO-cropped one for the Phase 7.1 ensemble) without touching the embedder's
+    YOLO-cropped one for the ensemble) without touching the embedder's
     training config.
     """
     manifest_path = manifest_override or cfg["data"]["manifest"]

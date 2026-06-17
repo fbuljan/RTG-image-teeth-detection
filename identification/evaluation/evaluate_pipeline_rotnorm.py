@@ -1,5 +1,5 @@
-"""Phase 8.1 evaluator — same protocol as evaluate_pipeline.py but with
-rotation canonicalisation applied to each detected tooth before embedding.
+"""Rotation-canonicalised evaluator — same protocol as evaluate_pipeline.py
+but with rotation canonicalisation applied to each detected tooth before embedding.
 
 This wraps `evaluate_pipeline` to reuse all its cached YOLO + FDI work; only
 the embedding step is replaced. For each cached Stage A/C output, we:
@@ -12,11 +12,11 @@ the embedding step is replaced. For each cached Stage A/C output, we:
   4. Run the rotnorm embedder on the canonicalised crops.
 
 We then run the same multi-tooth sweep + rotation-stress + held-out enrolment
-protocol as Phase 8.0 against the new embedder, and compute paired-difference
-bootstrap CIs vs the Phase 8.0 baseline.
+protocol as the baseline against the new embedder, and compute paired-difference
+bootstrap CIs vs the baseline.
 
 Uses a separate cache namespace keyed on the embedder hash so it never
-collides with the Phase 8.0 cache.
+collides with the baseline cache.
 """
 
 from __future__ import annotations
@@ -208,7 +208,7 @@ class CanonCache:
         if p.exists():
             return np.load(p)
         # We need the panoramic in the SAME frame the polygons live in.
-        # In Phase 8.0, polygons are in the rotated panoramic frame (if any
+        # Polygons in the baseline cache live in the rotated panoramic frame (if any
         # rotation was applied at extraction time, the panoramic was rotated
         # BEFORE YOLO ran and the polygons are in that rotated coordinate
         # system). To re-canonicalise, we must rotate the original panoramic
@@ -220,7 +220,7 @@ class CanonCache:
             # Mirror PIL's rotate(deg, expand=False, fillcolor=0). cv2's
             # warpAffine with center=(W/2, H/2) and the same sign convention
             # produces identical pixels (we verified empirically in the
-            # Phase 8.0 polygon-rotation sanity check, err=0.32px at 30°).
+            # baseline polygon-rotation sanity check, err=0.32px at 30°).
             h, w = pano.shape[:2]
             M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), rotation_deg, 1.0)
             pano = cv2.warpAffine(pano, M, (w, h), flags=cv2.INTER_LINEAR,
@@ -275,14 +275,14 @@ def _extract_canon_for_split(
     load_gt: bool,
 ) -> tuple[dict[str, np.ndarray], dict[str, StageACOutput], int]:
     """Extract canonicalised embeddings for each panoramic by reusing the
-    Phase 8.0 Stage A/C cache for YOLO+FDI work."""
+    baseline Stage A/C cache for YOLO+FDI work."""
     per_person: dict[str, np.ndarray] = {}
     stage_outputs: dict[str, StageACOutput] = {}
     n_failed = 0
     t0 = time.perf_counter()
     for i, (pid, image_id, pano_path, angle) in enumerate(test_persons):
         gt_polys = load_gt_polygons(image_id) if load_gt else {}
-        # Reuses Phase 8.0's YOLO+FDI cache (cheap)
+        # Reuses the baseline's YOLO+FDI cache (cheap)
         st = stage_ac_cache.get_stage_ac(models, pano_path, pid, image_id, angle, gt_polys)
         if st is None:
             n_failed += 1
@@ -311,7 +311,7 @@ def main() -> None:
     parser.add_argument("--registry-dir", required=True,
                         help="Path to the rotnorm registry directory.")
     parser.add_argument("--phase8-baseline-dir", default="identification/runs/phase8_baseline",
-                        help="Where the Phase 8.0 Stage A/C cache lives (we reuse it).")
+                        help="Where the baseline Stage A/C cache lives (we reuse it).")
     parser.add_argument("--output-dir", default="identification/runs/phase8_rotnorm",
                         help="Where to write the new payload + canon embeddings cache.")
     parser.add_argument("--manifest", default="identification/data/manifest_clean.csv",
@@ -348,7 +348,7 @@ def main() -> None:
     embedder_hash = _file_hash(config.embedder)
     print(f"YOLO seg hash: {yolo_hash}, FDI hash: {fdi_hash}, rotnorm embedder hash: {embedder_hash}")
 
-    # Phase 8.0 Stage A/C cache (read-only reuse)
+    # Baseline Stage A/C cache (read-only reuse)
     baseline_dir = (PROJECT_ROOT / args.phase8_baseline_dir).resolve()
     stage_ac_cache = PipelineCache(
         output_dir=baseline_dir,
@@ -613,7 +613,7 @@ def main() -> None:
                   f"[{heldout['in_registry_r1_ci95_low']:.3f}, {heldout['in_registry_r1_ci95_high']:.3f}]")
         print(f"[heldout_enrol] saved → {output_dir/'heldout_enrol.json'}")
 
-    print("\nPhase 8.1 evaluation complete.")
+    print("\nRotnorm evaluation complete.")
 
 
 if __name__ == "__main__":

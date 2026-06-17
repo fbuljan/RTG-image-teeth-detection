@@ -1,10 +1,10 @@
-# Phase 8.3 — FDI-init embedder trained on a verified-aligned GT/YOLO crop blend.
+# FDI-init embedder trained on a verified-aligned GT/YOLO crop blend.
 # Identical to configs/embedding_fdi_init.yaml (deployed embedder) except:
 # - data.yolo_blend section enables on-the-fly GT->YOLO crop substitution at training
 #   time (prob=0.3, only on accept=True rows of pair_table_train.csv).
-# - augmentations REVERT to deployed defaults (NO 8.2 scale jitter): rotation=10,
-#   translate=0.05. The 8.3 hypothesis is "exposure to real YOLO crops fixes the
-#   distribution shift"; we don't compound with 8.2's failed approach.
+# - augmentations stay at deployed defaults: rotation=10, translate=0.05. The
+#   hypothesis being tested is "exposure to real YOLO crops fixes the
+#   distribution shift", so we don't stack on scale jitter.
 # - new output dir + experiment name.
 #
 # Crops: GT path stays manifest_clean.csv. At __getitem__ on train split only,

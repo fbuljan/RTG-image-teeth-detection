@@ -201,7 +201,7 @@ identification/registry_blended_yolo/
 identification/registry_ensemble/
 identification/registry_ensemble_yolo/
 
-# Phase 6 demo
+# Demo runtime artifacts
 backend/temp/
 backend/sessions/
 backend/__pycache__/

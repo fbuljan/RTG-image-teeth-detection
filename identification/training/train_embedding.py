@@ -85,9 +85,9 @@ def _mine_safe(miner_fn, embeddings, labels):
 
     Critically returns the mined indices for use against the on-device embeddings,
     so the triplet loss is computed on-device and gradients flow back through
-    the backbone. (The pre-Phase-8.4 code .detach().cpu()'d the embeddings and
-    computed loss on CPU, which silently broke gradient flow into the backbone
-    on the fallback path — see Phase 8.4 design review.)
+    the backbone. (An earlier version of this helper .detach().cpu()'d the
+    embeddings and computed loss on CPU, which silently broke gradient flow
+    into the backbone on the fallback path.)
     """
     try:
         return miner_fn(embeddings, labels)
@@ -117,7 +117,7 @@ def _hard_pairs_to_device(hard_pairs, device):
 
 def train_one_epoch(model, loader, loss_fn, miner_fn, optimizer, scheduler, device, epoch,
                     aux_lambda: float = 0.0):
-    """Training loop; supports Phase 8.4 multi-task FDI aux loss when the model has
+    """Training loop; supports the multi-task FDI aux loss when the model has
     fdi_head and the loader yields (images, person_labels, fdi_labels)."""
     model.train()
     total_loss = 0.0
@@ -168,7 +168,7 @@ def train_one_epoch(model, loader, loss_fn, miner_fn, optimizer, scheduler, devi
                 loss = aux_lambda * aux
         else:
             if triplet is None:
-                # No triplet, no aux: skip backward (preserves pre-8.4 behaviour)
+                # No triplet, no aux: skip backward (preserves pre-aux-loss behaviour)
                 if scheduler is not None:
                     scheduler.step()
                 continue
@@ -261,7 +261,7 @@ def main():
     parser.add_argument("--config", required=True, help="Path to YAML config")
     parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--init-from-classifier", default=None,
-                        help="Path to Phase 2 classifier checkpoint; copies backbone weights")
+                        help="Path to a classifier checkpoint; copies backbone weights")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -283,7 +283,7 @@ def main():
     num_persons = len(label_map)
     print(f"Task: person identification, Persons: {num_persons}")
 
-    # Phase 8.4 — optional FDI multi-task aux loss. Build FDI->idx label map
+    # Optional FDI multi-task aux loss. Build FDI->idx label map
     # consistent with the deployed FDI classifier (52 classes, sorted numerically).
     aux_cfg = cfg.get("aux_loss") or {}
     aux_lambda = float(aux_cfg.get("lambda", 0.0)) if aux_cfg.get("type") == "fdi" else 0.0
@@ -317,7 +317,7 @@ def main():
     )
     print(f"Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples")
 
-    # Phase 8.3 — optional GT->YOLO blend on the train dataset
+    # Optional GT->YOLO blend on the train dataset
     blend_cfg = cfg.get("data", {}).get("yolo_blend")
     if blend_cfg:
         n_pairs = train_dataset.enable_yolo_blend(
@@ -360,7 +360,7 @@ def main():
     print(f"Model: ResNet-18 → {model_cfg.get('embedding_dim', 128)}-dim embedding{head_str}, "
           f"{sum(p.numel() for p in model.parameters()):,} params")
 
-    # Optionally initialize backbone from Phase 2 classifier
+    # Optionally initialize backbone from a pretrained classifier
     init_from = args.init_from_classifier or cfg.get("init_from_classifier")
     if init_from:
         print(f"Initializing backbone from classifier: {init_from}")
@@ -428,7 +428,7 @@ def main():
     patience = eval_cfg.get("patience", 10)
     patience_counter = 0
 
-    # Phase 8.4 kill-switches (only active when aux loss is on)
+    # Aux-loss kill-switches (only active when aux loss is on)
     aux_enabled = aux_lambda > 0.0
     killswitch_cfg = cfg.get("killswitch") or {}
     ks_epoch = int(killswitch_cfg.get("epoch", 20))
@@ -530,7 +530,7 @@ def main():
                     print(f"  Early stopping at epoch {epoch+1} (patience={patience})")
                     break
 
-        # Phase 8.4 kill-switch at the configured epoch
+        # Aux-loss kill-switch at the configured epoch
         if aux_enabled and (epoch + 1) == ks_epoch and val_rank1 > 0:
             reasons = []
             if val_rank1 < ks_min_val_rank1:

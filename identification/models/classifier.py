@@ -2,7 +2,8 @@
 Tooth classification model.
 
 ResNet-18 backbone with configurable classification head.
-Backbone/head separation enables reuse in Phase 3 (swap head for embedding projection).
+Backbone/head separation enables reuse for embedding training (swap head for
+the embedding projection).
 """
 
 import torch

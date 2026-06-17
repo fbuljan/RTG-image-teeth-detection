@@ -1,16 +1,17 @@
 """
-Phase 8.7 — Leave-One-Tooth-Out (LOTO) per-FDI evaluation.
+Leave-One-Tooth-Out (LOTO) per-FDI evaluation.
 
 Pure post-hoc consumer: loads cached per-crop embeddings + stage_ac metadata produced
 by `evaluate_pipeline.py` and the deployed FAISS registry. For each FDI with n >= 30
 crops, queries each crop alone against the full 1178-person registry, reporting R1/R5
 with person-stratified bootstrap CIs.
 
-Observation-only: no Pass/Fail criterion. The plan's adversarial honesty rule:
+Observation-only: no Pass/Fail criterion. The pre-registered adversarial
+honesty rule:
   If max(per_fdi_R1_mean) - min(per_fdi_R1_mean) <= 0.05, the figure adds nothing
   beyond the pooled single-tooth R1, and the thesis text says so explicitly.
 
-Re-uses Phase 8.6 calibration's caches; no embedder/YOLO inference happens here.
+Reuses the open-set calibration caches; no embedder/YOLO inference happens here.
 
 Usage:
   PYTHONPATH=. python identification/evaluation/evaluate_loto.py \\
@@ -373,7 +374,7 @@ def plot_heatmap(table: dict, out_path: Path, title_suffix: str = "") -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--cache-dir", type=Path, required=True,
-                   help="Phase 8.6 cache root (contains stage_ac/ and embeddings/)")
+                   help="Open-set calibration cache root (contains stage_ac/ and embeddings/)")
     p.add_argument("--registry", type=Path, required=True,
                    help="Registry path stem (e.g. identification/registry_ensemble_yolo/embedding_fdi_init_v1) — looks for index.faiss + index.ids.json")
     p.add_argument("--out-dir", type=Path, required=True)
@@ -397,21 +398,21 @@ def main() -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
 
-    print(f"[phase8.7] cache:    {args.cache_dir}")
-    print(f"[phase8.7] registry: {args.registry}")
-    print(f"[phase8.7] rotation: {args.rotation}")
-    print(f"[phase8.7] seed:     {args.seed}")
+    print(f"[loto] cache:    {args.cache_dir}")
+    print(f"[loto] registry: {args.registry}")
+    print(f"[loto] rotation: {args.rotation}")
+    print(f"[loto] seed:     {args.seed}")
 
     # 1. Load cache
     records = load_cache(args.cache_dir, args.rotation)
     n_pids = len({r["pid"] for r in records})
-    print(f"[phase8.7] loaded {len(records)} crops from {n_pids} persons "
+    print(f"[loto] loaded {len(records)} crops from {n_pids} persons "
           f"({args.rotation} only)")
 
     # 2. Load registry
     stem = _registry_stem(args.registry)
     registry = RetrievalIndex.load(str(stem), dim=records[0]["emb"].shape[0])
-    print(f"[phase8.7] registry size: {len(registry)} persons")
+    print(f"[loto] registry size: {len(registry)} persons")
 
     # 3. Single-tooth retrieval (full registry, k=5)
     queried = query_against_registry(records, registry)
@@ -438,15 +439,15 @@ def main() -> int:
             "registry_size": len(registry),
             **table,
         }, f, indent=2)
-    print(f"[phase8.7] wrote {out_json}")
+    print(f"[loto] wrote {out_json}")
 
     out_png = args.out_dir / f"heatmap_{args.rotation}.png"
     plot_heatmap(table, out_png, title_suffix=f" · {args.rotation}")
-    print(f"[phase8.7] wrote {out_png}")
+    print(f"[loto] wrote {out_png}")
 
     # 6. Verdict / text summary
     print()
-    print(f"[phase8.7] === results ({args.rotation}) ===")
+    print(f"[loto] === results ({args.rotation}) ===")
     print(f"  global single-tooth R1 = {table['global_r1_mean']:.3f} "
           f"[{table['global_r1_ci_low']:.3f}, {table['global_r1_ci_high']:.3f}]")
     print(f"  global single-tooth R5 = {table['global_r5_mean']:.3f} "

@@ -1,5 +1,5 @@
 """
-Evaluate a Phase 2 classifier checkpoint as a feature extractor for person retrieval.
+Evaluate a classifier checkpoint as a feature extractor for person retrieval.
 
 Loads the ResNet-18 backbone from a classifier (FDI / eruption / root), extracts
 512-dim features for the test split, L2-normalizes, then runs the same
@@ -38,7 +38,7 @@ from identification.evaluation.evaluate_person_retrieval import (
 
 
 def load_classifier_checkpoint(checkpoint_path, device):
-    """Load a Phase 2 classifier checkpoint."""
+    """Load a classifier checkpoint."""
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg = ckpt["config"]
     label_map = ckpt["label_map"]
@@ -81,7 +81,7 @@ def extract_classifier_features(model, loader, device):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True,
-                        help="Path to Phase 2 classifier checkpoint (e.g. tooth_fdi_raw/best.pt)")
+                        help="Path to a classifier checkpoint (e.g. tooth_fdi_raw/best.pt)")
     parser.add_argument("--manifest", default="identification/data/manifest_clean.csv")
     parser.add_argument("--split", default="test")
     parser.add_argument("--output-dir", default=None)

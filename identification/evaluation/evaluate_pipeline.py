@@ -1,10 +1,10 @@
-"""End-to-end YOLO-pipeline evaluation (Phase 8.0 baseline).
+"""End-to-end YOLO-pipeline evaluation (baseline).
 
 Runs the deployed demo pipeline (YOLO segmentation → crop → FDI dedup → embed)
 on the held-out test split and reports R1/R5/R10/mAP at n_query ∈ {1, 2, 4, 8, 16}
 with bootstrap 95% CIs over persons. (Closed-set verification AUROC is not
-computed here; the open-set AUROC for Phase 8.6 is derived downstream from the
-`records` flat list in `heldout_enrol.json`.) Adds two adversarial slices:
+computed here; the open-set AUROC is derived downstream from the `records` flat
+list in `heldout_enrol.json`.) Adds two adversarial slices:
 
 * rotation-stress: every test panoramic is rotated by a uniformly drawn angle in
   ±rotation_deg before YOLO segmentation. PAIRED to the baseline by using the
@@ -13,9 +13,10 @@ computed here; the open-set AUROC for Phase 8.6 is derived downstream from the
 * held-out enrolment: a sample of test persons is removed from the full
   1,178-person production registry; queries from the held-out persons are
   recorded against the remaining 1,148. Per-query records (similarity, gap,
-  pid, label) are saved flat so Phase 8.6 can compute open-set AUROC downstream.
+  pid, label) are saved flat so the open-set evaluator can compute AUROC
+  downstream.
 
-Two-layer cache so Phase 8.1–8.10 can swap the embedder without re-running YOLO:
+Two-layer cache so follow-up evaluations can swap the embedder without re-running YOLO:
 
   Stage A/C cache (YOLO + crops + FDI dedup) is keyed on
     (image_id, rotation_deg, yolo_hash, fdi_hash, crop_size, yolo_conf, yolo_iou, yolo_imgsz)
@@ -23,8 +24,8 @@ Two-layer cache so Phase 8.1–8.10 can swap the embedder without re-running YOL
     (stage_ac_key, embedder_hash)
 
 Also computes YOLO mask-mAP per rotation bucket (vs GT red-mask polygons from
-the per-FDI mask PNGs in dataset_raw), so a Phase 8.1 rotation-stress drop can
-be attributed to YOLO or the embedder.
+the per-FDI mask PNGs in dataset_raw), so a rotation-stress drop can be
+attributed to YOLO or the embedder.
 
 Usage:
     python -m identification.evaluation.evaluate_pipeline \\
@@ -367,7 +368,7 @@ def extract_stage_ac(
     Mirrors backend.pipeline.run_pipeline lines covering segmentation, polygon
     bbox derivation, 10% padding, FDI classification, and duplicate-FDI dedup.
     Embedding is NOT done here so the result can be cached and reused across
-    Phase 8.1+ embedder swaps.
+    embedder swaps.
     """
     cfg = models.config
     device = models.device
@@ -851,7 +852,7 @@ def _evaluate_against_full_registry_paired(
 
 
 # ---------------------------------------------------------------------------
-# Per-FDI breakdown — Phase 8.0 plan deliverable
+# Per-FDI breakdown
 # ---------------------------------------------------------------------------
 
 def _per_fdi_breakdown(
@@ -924,8 +925,8 @@ def evaluate_heldout_enrolment(
     """Drop n_holdout test persons from the full registry per trial, record per-query signals.
 
     Returns a flat records list (`records`) with one row per (pid, trial), labelled
-    "oos" or "in_registry". Phase 8.6 will compute AUROC + person-stratified bootstrap
-    from these records directly.
+    "oos" or "in_registry". The open-set evaluator computes AUROC +
+    person-stratified bootstrap from these records directly.
     """
     test_pids = list(per_person_embs.keys())
     if len(test_pids) < n_holdout + 5:
@@ -935,7 +936,7 @@ def evaluate_heldout_enrolment(
 
     records: list[dict] = []
     in_r1_per_trial: list[float] = []
-    K_TOP = 5  # Phase 8.6 — top-5 retrieval feeds mean_top5_sim, gap_top1_vs_mean5.
+    K_TOP = 5  # top-5 retrieval feeds mean_top5_sim, gap_top1_vs_mean5.
     for trial in range(n_trials):
         held = set(rng.choice(test_pids, size=n_holdout, replace=False))
         sub_index = _rebuild_index_without(full_registry, held)
@@ -953,7 +954,7 @@ def evaluate_heldout_enrolment(
             label = "oos" if pid in held else "in_registry"
             sim_top1 = float(sims[0])
             gap = float(sims[0] - sims[1]) if len(sims) > 1 else 1.0
-            # Phase 8.6 open-set features
+            # Open-set features
             sims_arr = np.asarray(sims, dtype=np.float64)
             mean_top5_sim = float(sims_arr.mean()) if len(sims_arr) else sim_top1
             tail = sims_arr[1:] if len(sims_arr) > 1 else sims_arr
@@ -1172,7 +1173,7 @@ def main() -> None:
     parser.add_argument("--skip-rotation", action="store_true")
     parser.add_argument("--skip-heldout", action="store_true")
     parser.add_argument("--heldout-under-rotation", action="store_true",
-                        help="Phase 8.6: also run held-out enrolment with rotated queries "
+                        help="Also run held-out enrolment with rotated queries "
                              "vs the upright registry (writes heldout_enrol_rotated.json). "
                              "Reuses rotation-slice embeddings when --skip-rotation is not set; "
                              "otherwise performs its own rotated extraction.")
@@ -1180,14 +1181,14 @@ def main() -> None:
                         help="Optional: cap test persons for a smoke test.")
     parser.add_argument("--embedder", default=None,
                         help="Optional: override the deployed embedder checkpoint "
-                             "(e.g. for Phase 8.x experiments).")
+                             "(for follow-up experiments).")
     parser.add_argument("--registry-dir", default=None,
                         help="Optional: override the deployed registry directory "
                              "(must match the embedder).")
     parser.add_argument("--split", default="test",
                         help="Which manifest split to evaluate (test by default). "
-                             "Phase 8.5+ uses 'val' to fit aggregation weights "
-                             "without touching the test set.")
+                             "The weighted-aggregation fit uses 'val' so the test "
+                             "set is never touched during fitting.")
     args = parser.parse_args()
 
     output_dir = (PROJECT_ROOT / args.output_dir).resolve()
@@ -1195,7 +1196,7 @@ def main() -> None:
 
     config = PipelineConfig()
 
-    # Phase 8.x embedder/registry swap: normalise relative paths to absolute so
+    # Embedder/registry override: normalise relative paths to absolute so
     # later `Path.relative_to(PROJECT_ROOT)` calls work for either form.
     if args.embedder is not None:
         emb_path = Path(args.embedder)
@@ -1530,7 +1531,7 @@ def main() -> None:
                   f"p10-p90: [{heldout['in_sim_top1']['p10']:.3f}, {heldout['in_sim_top1']['p90']:.3f}]")
         print(f"[heldout_enrol] saved → {output_dir/'heldout_enrol.json'}")
 
-    # --- Phase 8.6: heldout enrolment with rotated queries vs upright registry ---
+    # --- Heldout enrolment with rotated queries vs upright registry ---
     if args.heldout_under_rotation and not args.skip_heldout:
         print("\n[heldout_enrol_rotated] preparing rotated query embeddings...")
         if per_person_rot_captured is not None and len(per_person_rot_captured) > 0:
@@ -1570,7 +1571,7 @@ def main() -> None:
             print(f"  rotated IN   sim_top1 median: {heldout_rot['in_sim_top1']['median']:.3f}")
         print(f"[heldout_enrol_rotated] saved → {output_dir/'heldout_enrol_rotated.json'}")
 
-    print("\nPhase 8.0 baseline complete.")
+    print("\nBaseline pipeline evaluation complete.")
 
 
 if __name__ == "__main__":

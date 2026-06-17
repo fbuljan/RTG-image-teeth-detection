@@ -1,11 +1,11 @@
 """
-GT-crop person-retrieval anchor for Phase 8 comparison.
+GT-crop person-retrieval anchor.
 
-Re-runs the deployed Phase 5 embedder (or any embedder) through the modern Phase 8
-bootstrap protocol on GT crops, so the resulting R1@n=16 + 95% CI lives on the
-same codepath as `evaluate_pipeline.py`. This produces the "GT regression anchor"
-that Phase 8.x experiments compare against, rather than the stale Phase 5 number
-that was measured with only n_trials=5 and no CIs.
+Re-runs the deployed embedder (or any embedder) through the bootstrap
+protocol used in evaluate_pipeline.py against GT crops, so the resulting
+R1@n=16 + 95% CI lives on the same codepath. This produces the "GT
+regression anchor" that follow-up experiments compare against, replacing an
+older measurement that used only n_trials=5 and no CIs.
 
 Protocol per n_query (matches `_evaluate_sweep_symmetric_paired` in evaluate_pipeline.py):
   - Eligible persons: those with >= n_query + 1 GT crops in the split

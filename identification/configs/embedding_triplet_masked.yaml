@@ -1,4 +1,4 @@
-# Phase 4.1: Masked crop embedding (same config as baseline, only crop_mode differs)
+# Masked crop embedding (same config as baseline, only crop_mode differs)
 experiment_name: embedding_triplet_masked_v1
 
 data:

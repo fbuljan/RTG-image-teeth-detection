@@ -2,9 +2,10 @@
 
 Mirrors the runtime crop pipeline in backend/pipeline.py so the resulting
 crops (and the registries built from them) match the distribution the demo
-sees at inference. Used to fix the Phase 7.1 deployment distribution-shift
-issue: rebuilding the ensemble registry from YOLO crops eliminates the
-gap between Phase 7.1 eval results and live demo behaviour.
+sees at inference. Used to fix the deployment distribution-shift issue
+between GT-cropped training and YOLO-cropped inference: rebuilding the
+ensemble registry from YOLO crops eliminates the gap between eval results
+and live demo behaviour.
 
 Output layout (mirrors crops_gt/):
 

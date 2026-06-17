@@ -1,4 +1,4 @@
-# Phase 4.2: Embedding with FDI metadata fusion (raw crops)
+# Embedding with FDI metadata fusion (raw crops)
 experiment_name: embedding_metadata_v1
 
 data:

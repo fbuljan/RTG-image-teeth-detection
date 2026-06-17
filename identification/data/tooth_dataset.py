@@ -39,11 +39,10 @@ class GaussianNoise:
 def get_train_transforms(aug_cfg: Optional[dict] = None) -> transforms.Compose:
     """Build training transforms with medical-image-safe augmentations.
 
-    The optional ``scale`` key enables bbox-jitter (Phase 8.2): RandomAffine
-    samples a per-image isotropic scale in the given (min, max) range, which
-    simulates the YOLO-vs-GT crop-framing distribution shift that Phase 7.1
-    surfaced (median 4.8 deg polygon disagreement, ~30% of crops differ
-    measurably in framing).
+    The optional ``scale`` key enables bbox-jitter: RandomAffine samples a
+    per-image isotropic scale in the given (min, max) range, which simulates
+    the YOLO-vs-GT crop-framing distribution shift (median 4.8 deg polygon
+    disagreement, ~30% of crops differ measurably in framing).
     """
     cfg = aug_cfg or {}
     translate = cfg.get("translate", 0.05)
@@ -126,7 +125,7 @@ class ToothDataset(Dataset):
         # Path column
         self.path_col = "crop_path" if crop_mode == "raw" else "masked_crop_path"
 
-        # Phase 8.3 — optional GT->YOLO crop blend. Configured by enable_yolo_blend().
+        # Optional GT->YOLO crop blend. Configured by enable_yolo_blend().
         self._blend_map: Optional[Dict[tuple, str]] = None
         self._blend_prob: float = 0.0
         self._blend_log: list = []  # captures first-epoch substitution trace for diagnostics
@@ -146,9 +145,9 @@ class ToothDataset(Dataset):
     def enable_yolo_blend(self, pair_table_path: str, prob: float,
                           log_trace: bool = True) -> int:
         """
-        Phase 8.3 — at train time, substitute the GT crop with a verified-aligned
-        YOLO crop with probability `prob`. Only accept=True rows in the pair table
-        are eligible (IoU>=0.5 AND fdi_confidence>=0.5).
+        At train time, substitute the GT crop with a verified-aligned YOLO crop
+        with probability `prob`. Only accept=True rows in the pair table are
+        eligible (IoU>=0.5 AND fdi_confidence>=0.5).
 
         Hard guard: only enable on training split.
 
@@ -201,7 +200,7 @@ class ToothDataset(Dataset):
         row = self.df.iloc[idx]
         path = row[self.path_col]
 
-        # Phase 8.3 GT->YOLO blend (training only, gated by enable_yolo_blend)
+        # GT->YOLO blend (training only, gated by enable_yolo_blend)
         if self._blend_map is not None and self._blend_prob > 0.0:
             key = (str(row["image_id"]), str(row["tooth_fdi"]))
             substituted = False

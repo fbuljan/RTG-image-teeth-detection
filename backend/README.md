@@ -38,8 +38,8 @@ that file or instantiating a different `PipelineConfig` in `backend/app.py`.
 | Field | Default | Notes |
 | --- | --- | --- |
 | `yolo_weights` | `runs-detection/train3/weights/best.pt` | Trained tooth detector |
-| `fdi_classifier` | `identification/runs/tooth_fdi_raw/best.pt` | Phase 2 FDI classifier |
-| `embedder` | `identification/runs/embedding_fdi_init_v1/best.pt` | Phase 4 best embedder |
+| `fdi_classifier` | `identification/runs/tooth_fdi_raw/best.pt` | FDI classifier |
+| `embedder` | `identification/runs/embedding_fdi_init_v1/best.pt` | Best embedder |
 | `registry_dir` | `identification/registry` | FAISS index + metadata |
 | `top_k` | `5` | Number of candidates returned |
 | `min_teeth_warning` | `4` | Threshold below which a warning event is emitted |

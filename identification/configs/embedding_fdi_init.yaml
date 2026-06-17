@@ -1,4 +1,4 @@
-# Phase 4.6: Embedding with FDI-classifier-pretrained backbone
+# Embedding with FDI-classifier-pretrained backbone
 experiment_name: embedding_fdi_init_v1
 
 data:
@@ -14,7 +14,7 @@ model:
   embedding_dim: 128
   dropout: 0.2
 
-# Auto-load backbone weights from Phase 2 classifier
+# Auto-load backbone weights from the FDI classifier
 init_from_classifier: identification/runs/tooth_fdi_raw/best.pt
 
 train:

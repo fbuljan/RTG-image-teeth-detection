@@ -136,7 +136,7 @@ def fig_multi_tooth_curve():
 
 
 def fig_per_fdi_baseline():
-    """Per-FDI Rank-1 for baseline model (Phase 4.3)."""
+    """Per-FDI Rank-1 for the baseline model."""
     csv_path = REPO_ROOT / "identification" / "runs" / "embedding_triplet_v1" / "analysis" / "per_tooth" / "per_fdi_metrics.csv"
     if not csv_path.exists():
         return
