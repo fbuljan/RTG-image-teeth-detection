@@ -1,4 +1,4 @@
-"""FastAPI backend for the Phase 6 demo.
+"""FastAPI backend for the dental identification demo.
 
 Endpoints:
     GET  /api/health                            -> liveness check
@@ -44,7 +44,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 app = FastAPI(title="Tooth Identification Demo", version="0.1.0")
 
 # Allow the Next.js dev server (default port 3000, plus 3005 as an alt port
-# used during audits when the canonical 3000 is occupied by another process).
+# used when the canonical 3000 is occupied by another process).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -67,9 +67,9 @@ def _startup() -> None:
     config.temp_dir.mkdir(parents=True, exist_ok=True)
     cleanup_temp_dir(config.temp_dir, max_age_seconds=0)
     models.load_all()
-    # Phase 9.7 — sweep expired sessions at boot. Without this, a session
-    # whose user never returns leaks disk space forever (the 24h TTL only
-    # fires when an enrol/list/delete endpoint is hit).
+    # Sweep expired sessions at boot. Without this, a session whose user never
+    # returns leaks disk space forever (the 24h TTL only fires when an enrol/
+    # list/delete endpoint is hit).
     config.sessions_dir.mkdir(parents=True, exist_ok=True)
     removed = session_store.cleanup_expired_sessions(config.sessions_dir)
     if removed:
@@ -178,12 +178,12 @@ def _build_model_card() -> dict:
         with open(eval_metrics_path) as f:
             card["eval_test"] = json.load(f)
 
-    # Multi-tooth sweep — DEPLOYED pipeline (Phase 8.0 YOLO-built registry).
-    # Headline R1 @ n=16 = 82.6% [79.8, 86.0]. This is the same artefact the
-    # deployment headline tooltip cites, so the on-page table is internally
-    # consistent. The legacy Phase 5 single-model GT-crop sweep (which used
-    # to power this table) reported 55.1% — superseded by the YOLO-built
-    # registry rebuild; preserved on disk under
+    # Multi-tooth sweep — DEPLOYED pipeline (YOLO-built registry). Headline
+    # R1 @ n=16 = 82.6% [79.8, 86.0]. This is the same artefact the deployment
+    # headline tooltip cites, so the on-page table is internally consistent.
+    # The legacy single-model GT-crop sweep (which used to power this table)
+    # reported 55.1% — superseded by the YOLO-built registry rebuild;
+    # preserved on disk under
     # `embedding_fdi_init_v1/analysis/person_retrieval/metrics.json` for the
     # GT-only ensemble comparison block (loaded separately below as the
     # offline ensemble vs single-model anchor).
@@ -219,10 +219,10 @@ def _build_model_card() -> dict:
             })
         card["multi_tooth_sweep"] = sweep
 
-    # The legacy Phase 5 GT-crop single-model sweep is still loaded as a
-    # comparator for the offline GT ensemble block (EnsembleSweepTable's
-    # "Single R-1" column). It does NOT drive the headline multi-tooth
-    # block above — that's now the deployed YOLO-built-registry numbers.
+    # The legacy GT-crop single-model sweep is still loaded as a comparator
+    # for the offline GT ensemble block (EnsembleSweepTable's "Single R-1"
+    # column). It does NOT drive the headline multi-tooth block above —
+    # that's now the deployed YOLO-built-registry numbers.
     if person_retrieval_path.exists():
         with open(person_retrieval_path) as f:
             payload = json.load(f)
@@ -239,11 +239,11 @@ def _build_model_card() -> dict:
     card["per_category"] = _load_csv(category_csv)
     card["subgroups"] = _load_csv(subgroup_csv)
 
-    # Phase 8.9 person-level cohort retrieval (full panoramic queries against
-    # the 1,178-person deployed registry). This is the apples-to-apples Phase
-    # 8.9 surface the thesis cites; the per-tooth-crop SubgroupBlock above is
-    # a different protocol (per-tooth crop search). Both shipped together so
-    # the UI can disambiguate them.
+    # Person-level cohort retrieval (full panoramic queries against the
+    # 1,178-person deployed registry). This is the apples-to-apples surface
+    # the thesis cites; the per-tooth-crop SubgroupBlock above is a different
+    # protocol (per-tooth crop search). Both shipped together so the UI can
+    # disambiguate them.
     cohort_path = PROJECT_ROOT / "identification/runs/phase8_permanent/subset_eval.json"
     if cohort_path.exists():
         with open(cohort_path) as f:
@@ -257,7 +257,7 @@ def _build_model_card() -> dict:
             "honesty_rule_verdict": cohort.get("honesty_rule_verdict"),
         }
 
-    # Phase 8 rotation-stress headline numbers (±30° per-person rotation, full
+    # Rotation-stress headline numbers (±30° per-person rotation, full
     # registry, deployed pipeline). One condensed row for the demo; the full
     # paired-bootstrap analysis stays in the eval artefact.
     rotation_path = PROJECT_ROOT / "identification/runs/phase8_deployed_yolo_reg/rotation_stress.json"
@@ -283,10 +283,10 @@ def _build_model_card() -> dict:
             ],
         }
 
-    # Phase 8.6 open-set headline numbers — sourced from the canonical
-    # results.json (test-set clean + rotated bootstrap AUROCs and the locked
-    # decision threshold). The frontend uses these in the open-set block;
-    # reading from JSON here means hardcoded strings cannot drift.
+    # Open-set headline numbers — sourced from the canonical results.json
+    # (test-set clean + rotated bootstrap AUROCs and the locked decision
+    # threshold). The frontend uses these in the open-set block; reading from
+    # JSON here means hardcoded strings cannot drift.
     open_set_results_path = PROJECT_ROOT / "identification/runs/phase8_open_set/results.json"
     open_set_cal_path = PROJECT_ROOT / "identification/runs/phase8_open_set/phase8_open_set_calibration.json"
     if open_set_results_path.exists() and open_set_cal_path.exists():
@@ -331,8 +331,8 @@ def _build_model_card() -> dict:
         with open(yolo_summary_path) as f:
             card["yolo"] = json.load(f)
 
-    # Phase 7.1 ensemble metrics — both the GT-crop eval and the YOLO-crop
-    # deployment-aligned eval (saved by evaluate_ensemble.py with --manifest).
+    # Ensemble metrics — both the GT-crop eval and the YOLO-crop deployment-
+    # aligned eval (saved by evaluate_ensemble.py with --manifest).
     def _load_ensemble_payload(rel_path: str) -> dict | None:
         path = PROJECT_ROOT / rel_path
         if not path.exists():
@@ -409,11 +409,11 @@ async def identify(
     The ensemble path is intentionally not exposed to the live demo (kept as
     an offline experiment); single-model FDI-init is the only deployed mode.
 
-    Phase 9.7 — when `X-Session-Id` is present and the session has ≥1
-    enrolment, the session's FAISS index is merged into the top-K alongside
-    the canonical 1,178-person index. Calibrated open-set / percentile / age
-    are always computed off the canonical top-1 (not the merged top-1) — the
-    Phase 8.6 calibration is canonical-only.
+    When `X-Session-Id` is present and the session has ≥1 enrolment, the
+    session's FAISS index is merged into the top-K alongside the canonical
+    1,178-person index. Calibrated open-set / percentile / age are always
+    computed off the canonical top-1 (not the merged top-1) — the open-set
+    calibration is canonical-only.
     """
     cleanup_temp_dir(config.temp_dir)
 
@@ -458,8 +458,8 @@ async def identify(
     return EventSourceResponse(event_stream())
 
 
-# Phase 9.5 — fragment re-search: re-pool a subset of cached tooth embeddings
-# without re-running detection/embedding. Sub-100ms response.
+# Fragment re-search: re-pool a subset of cached tooth embeddings without
+# re-running detection/embedding. Sub-100ms response.
 
 from pydantic import BaseModel  # noqa: E402
 
@@ -486,11 +486,11 @@ def search_fragment(
     When `X-Session-Id` is supplied, the caller's session enrolments are merged
     into the candidate pool — same contract as `/api/identify`. Without it the
     fragment search would silently drop session candidates that the parent
-    /identify just placed at rank #1, which is the bug fixed here.
+    /identify just placed at rank #1.
     """
-    # Phase 9.5.1 — guard against path traversal. The /identify endpoint mints
-    # query_id from uuid.uuid4().hex[:12] so it's always lowercase hex; mirror
-    # the /api/intermediate validation rather than passing arbitrary strings
+    # Guard against path traversal. The /identify endpoint mints query_id from
+    # uuid.uuid4().hex[:12] so it's always lowercase hex; mirror the
+    # /api/intermediate validation rather than passing arbitrary strings
     # straight into a filesystem join.
     if not _QUERY_ID_RE.fullmatch(req.query_id):
         raise HTTPException(status_code=400, detail="Invalid query_id")
@@ -510,7 +510,7 @@ def search_fragment(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-# ---------- Phase 9.6 — pre-cropped tooth upload ----------
+# ---------- Pre-cropped tooth upload ----------
 
 
 # Bound the number of crops per request — matches the FDI label space (32)
@@ -527,7 +527,7 @@ async def identify_crops(
     fdi_overrides_json: str | None = Form(None),
     session_id: str | None = Header(None, alias="X-Session-Id"),
 ) -> EventSourceResponse:
-    """Phase 9.6 — identify from pre-cropped tooth images.
+    """Identify from pre-cropped tooth images.
 
     Each file in `files` is a single tooth crop (PNG/JPG). `fdi_overrides_json`
     is an optional JSON-encoded array of length `len(files)` where each entry
@@ -611,18 +611,18 @@ async def identify_crops(
     return EventSourceResponse(event_stream())
 
 
-# ---------- Phase 9.7 — session enrolment ----------
+# ---------- Session enrolment ----------
 #
 # Three endpoints, all keyed on `X-Session-Id` header (a 16-char hex UUID
 # minted client-side and persisted in localStorage). Storage layout mirrors
 # the canonical registry — see backend/sessions.py.
 #
-# Calibrated open-set / percentile / age numbers from Phase 8.6/8.10 are NOT
-# carried through to session enrolments — calibration was learned on the
-# canonical 1,178-person distribution and is not transferable. The duplicate
-# detector uses the same _open_set_score helper to compute a session-aware
-# z-score on the would-be enrolment's top-1, but the answer is consumed only
-# as a UX hint (yellow banner), never as a verdict.
+# Calibrated open-set / percentile / age numbers are NOT carried through to
+# session enrolments — calibration was learned on the canonical 1,178-person
+# distribution and is not transferable. The duplicate detector uses the same
+# _open_set_score helper to compute a session-aware z-score on the would-be
+# enrolment's top-1, but the answer is consumed only as a UX hint (yellow
+# banner), never as a verdict.
 
 DUPLICATE_Z_THRESHOLD = 0.7
 # SESSION_ID_HEADER declared earlier (before /api/search-fragment, which also
@@ -748,8 +748,8 @@ def _enrol_locked(
     """Caller must hold session_store.session_lock(sid)."""
     # Duplicate detection: combine canonical + session top-1 sims to compute
     # the highest similarity across both indexes, then z-score it against the
-    # locked Phase 8.6 calibration. Only the z-score (not the canonical
-    # verdict) is used here.
+    # locked calibration. Only the z-score (not the canonical verdict) is
+    # used here.
     canonical_sims, canonical_ids = models.registry_index.search(
         query_vec, k=1
     )

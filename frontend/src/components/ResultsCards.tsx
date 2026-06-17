@@ -22,14 +22,14 @@ export type ResultsState = {
   timings: Record<string, number>;
   nQueryTeeth: number;
   nDropped: number;
-  // Phase 9.9 — structured list of dropped teeth (currently only FDI
-  // duplicates). Empty when the backend ran the panoramic path with no dedup
-  // collisions; undefined for stale callers.
+  // Structured list of dropped teeth (currently only FDI duplicates). Empty
+  // when the panoramic path saw no dedup collisions; undefined for stale
+  // callers.
   dropReasons?: DropReason[];
   toothContributions?: ToothContribution[];
   selectedPersonId?: string;
   selectedFakeName?: string;
-  // Phase 9.3 — Phase 8.6 calibrated open-set + provenance.
+  // Calibrated open-set + provenance.
   openSetScore: number | null;
   openSetDecision: OpenSetDecision;
   openSetThreshold: number | null;
@@ -39,17 +39,16 @@ export type ResultsState = {
   // whenever expectedPersonId is set. Lets the UI show "expected at #N"
   // when the right person didn't make the visible top-K.
   expectedMatch?: ExpectedMatch | null;
-  // Phase 9.4 — Phase 8.10 age estimate (sex NOT wired; failed Pass).
+  // Age estimate (sex NOT wired; failed the marginal-accuracy floor).
   ageEstimate: AgeEstimate | null;
-  // Phase 9.5 — fragment-search support.
   queryId: string | null;
   perTooth: PerTooth[];
-  // Phase 9.6 — true when the query came in via /api/identify-crops; flips
-  // the results-header copy from "Queried with N teeth" to "Matched from N
-  // pre-cropped teeth."
+  // True when the query came in via /api/identify-crops; flips the results-
+  // header copy from "Queried with N teeth" to "Matched from N pre-cropped
+  // teeth."
   cropsMode?: boolean;
-  // Phase 9.6.1 — per-input-crop outcomes (auto-FDI label, OOD status,
-  // duplicate-drop status). Only populated in crops mode.
+  // Per-input-crop outcomes (auto-FDI label, OOD status, duplicate-drop
+  // status). Only populated in crops mode.
   perCrop?: PerCrop[];
 };
 
@@ -63,11 +62,11 @@ type Props = {
   sessionId?: string | null;
 };
 
-// Deployed-protocol full-registry priors (sweep_full_registry from
-// phase8_deployed_yolo_reg/yolo_eval.json — same protocol that defines
-// R1@n=16=82.6% on the 1,178-person registry). Used by the FragmentSelector
-// to display "expected outcome at this N" so a rank-1 miss reads as a
-// confirmed data point not a credibility loss.
+// Deployed-protocol full-registry priors (sweep_full_registry from the
+// deployed-YOLO registry eval — same protocol that defines R1@n=16=82.6% on
+// the 1,178-person registry). Used by the FragmentSelector to display
+// "expected outcome at this N" so a rank-1 miss reads as a confirmed data
+// point not a credibility loss.
 const FRAGMENT_PRIORS: Record<number, { r1: number; r5: number }> = {
   1: { r1: 0.029, r5: 0.127 },
   2: { r1: 0.088, r5: 0.281 },
@@ -242,9 +241,9 @@ function CalibrationStrip({
   const scorePct = pct(score);
   const thrPct = pct(threshold);
   const isAccepted = decision === "in_registry";
-  // Phase 9.9 — distance from threshold in z-score space; positive = above
-  // threshold (accepted), negative = below (rejected). Used in the inline
-  // tooltip so the user can read "+0.94 above threshold" at a glance.
+  // Distance from threshold in z-score space; positive = above threshold
+  // (accepted), negative = below (rejected). Used in the inline tooltip so
+  // the user can read "+0.94 above threshold" at a glance.
   const gap = score - threshold;
   const gapSign = gap >= 0 ? "+" : "";
   const gapAbsStr = Math.abs(gap).toFixed(3);
@@ -414,13 +413,13 @@ export function ResultsCards({ state, onReset, onFragmentResult, sessionId }: Pr
       </header>
 
       <div className="space-y-4 px-6 py-5">
-        {/* Phase 9.5 — partial-fragment explorer */}
+        {/* Partial-fragment explorer. */}
         <FragmentSelector state={state} onFragmentResult={onFragmentResult} sessionId={sessionId} />
 
-        {/* Phase 9.6.1 — crops-mode honest verdict. The open-set head was
-            calibrated on full panoramics, so it rejects crops queries by
-            construction even when retrieval is correct. Surface that
-            up-front instead of leading with a confident-looking Top-5. */}
+        {/* Crops-mode honest verdict. The open-set head was calibrated on
+            full panoramics, so it rejects crops queries by construction even
+            when retrieval is correct. Surface that up-front instead of
+            leading with a confident-looking Top-5. */}
         {state.cropsMode && state.openSetDecision === "rejected" && (
           <div className="rounded-lg border border-amber-300/70 bg-amber-50 px-4 py-3 text-sm dark:border-amber-700/60 dark:bg-amber-950/30">
             <div className="flex items-start gap-2">
@@ -657,7 +656,7 @@ function ToothContributions({ contributions }: { contributions: ToothContributio
               <th className="py-1 text-right">Similarity → top-1</th>
               <th className="py-1 text-left pl-3">&nbsp;</th>
               <th className="py-1 text-right">FDI conf.</th>
-              {/* Phase 9.9 — YOLO detection confidence column. */}
+              {/* YOLO detection confidence column. */}
               <th className="py-1 pl-3 text-right">
                 <span className="inline-flex items-center">
                   YOLO conf.

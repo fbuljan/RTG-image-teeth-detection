@@ -20,9 +20,9 @@ export async function* streamIdentify(
   form.append("file", file);
   form.append("mode", options.mode ?? "segmentation");
 
-  // Phase 9.7 — opt-in session merge. If the caller didn't pass a session id
-  // (e.g. they haven't enrolled yet), we just omit the header and the
-  // backend returns the canonical-only ranking.
+  // Opt-in session merge. If the caller didn't pass a session id (e.g. they
+  // haven't enrolled yet), we just omit the header and the backend returns
+  // the canonical-only ranking.
   const headers: Record<string, string> = {};
   if (options.sessionId) headers["X-Session-Id"] = options.sessionId;
 
@@ -58,7 +58,7 @@ export async function* streamIdentify(
   }
 }
 
-// Phase 9.6 — pre-cropped tooth upload. Multipart files[] with optional
+// Pre-cropped tooth upload. Multipart files[] with optional
 // fdi_overrides_json string. Same SSE shape as /api/identify but with a
 // `validate` stage in place of `detect`/`fdi` and no panoramic-image
 // overlays.

@@ -147,7 +147,7 @@ type ModelCardPayload = {
   ensemble_available?: boolean;
   eval_test?: { verification: VerificationMetrics; retrieval: RetrievalMetrics };
   multi_tooth_sweep?: SweepEntry[];
-  // Legacy Phase 5 GT-crop single-model sweep, kept as the apples-to-apples
+  // Legacy GT-crop single-model sweep, kept as the apples-to-apples
   // comparator for the offline GT-crop ensemble block (so the ensemble Δ
   // column compares GT vs GT, not GT-ensemble vs deployed-YOLO-pipeline).
   // Not rendered as a standalone table.
@@ -584,7 +584,7 @@ function OpenSetBlock({ openSet }: { openSet: OpenSetHeadline }) {
   return (
     <div>
       <SectionTitle
-        title="Open-set rejection — Phase 8.6"
+        title="Open-set rejection"
         hint="Calibrated AUROC for the in-registry / out-of-set decision. The threshold is locked from validation; the live demo applies it to every query but does not show the verdict prominently."
       />
       <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
@@ -661,7 +661,7 @@ function PersonCohortsBlock({ cohorts }: { cohorts: PersonCohorts }) {
   return (
     <div>
       <SectionTitle
-        title="Person-level cohort retrieval — Phase 8.9"
+        title="Person-level cohort retrieval"
         hint="Full-panoramic queries against the 1,178-person deployed registry, stratified by dentition stage, age, and sex. Different protocol from the per-tooth-crop subgroup table below."
       />
       <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">

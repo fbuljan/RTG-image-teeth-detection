@@ -37,19 +37,19 @@ export default function Page() {
   const [mode, setMode] = useState<PipelineMode>(DEFAULT_MODE);
   const [pipeline, setPipeline] = useState<PipelineState>(INITIAL_PIPELINE);
   const [results, setResults] = useState<ResultsState | null>(null);
-  // Phase 9.6 — input mode switch. "panoramic" routes to /api/identify,
-  // "crops" routes to /api/identify-crops. Toggling clears any in-flight
-  // results so the user doesn't see stale state from the other path.
+  // Input mode switch. "panoramic" routes to /api/identify, "crops" routes
+  // to /api/identify-crops. Toggling clears any in-flight results so the
+  // user doesn't see stale state from the other path.
   const [inputMode, setInputMode] = useState<InputMode>("panoramic");
-  // Phase 9.5 — per-tooth metadata captured during embed-stage, consumed when search completes.
+  // Per-tooth metadata captured during embed-stage, consumed when search completes.
   const perToothRef = useRef<import("@/lib/api").PerTooth[]>([]);
   const registryRef = useRef<RegistryListHandle | null>(null);
   const pipelineRef = useRef<HTMLDivElement | null>(null);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const toasts = useToasts();
-  // Phase 9.7 — session enrolment state. session_id is minted lazily on first
-  // mount and persisted in localStorage; the parent passes it down to the
-  // modal + identify stream so identify-with-session-merge works.
+  // Session enrolment state. session_id is minted lazily on first mount and
+  // persisted in localStorage; the parent passes it down to the modal +
+  // identify stream so identify-with-session-merge works.
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [showEnrolModal, setShowEnrolModal] = useState(false);
   const [enrolmentsNonce, setEnrolmentsNonce] = useState(0);
@@ -101,15 +101,15 @@ export default function Page() {
       });
 
       try {
-        // Reset the per-tooth cache for this new query (Phase 9.5).
+        // Reset the per-tooth cache for this new query.
         perToothRef.current = [];
         for await (const evt of streamIdentify(file, {
           mode,
-          // Phase 9.7 — when present, backend merges this session's
-          // enrolments into the top-K. Calibration stays canonical-only.
+          // When present, backend merges this session's enrolments into the
+          // top-K. Calibration stays canonical-only.
           sessionId: sessionId ?? undefined,
         })) {
-          // Phase 9.5 — capture per-tooth metadata from embed stage for fragment-search.
+          // Capture per-tooth metadata from embed stage for fragment-search.
           if (
             evt.event === "stage_complete"
             && evt.data.stage === "embed"
@@ -157,9 +157,9 @@ export default function Page() {
     [selected, toasts, mode, sessionId],
   );
 
-  // Phase 9.7 — "Verify by re-querying" from the EnrolModal triggers a normal
-  // identify on the freshly-enrolled panoramic; the session-merged top-K
-  // should put the session entry at rank 1 with sim ≈ 1.0.
+  // "Verify by re-querying" from the EnrolModal triggers a normal identify
+  // on the freshly-enrolled panoramic; the session-merged top-K should put
+  // the session entry at rank 1 with sim ≈ 1.0.
   const verifyEnrolment = useCallback(
     (file: File) => {
       setShowEnrolModal(false);
@@ -168,10 +168,10 @@ export default function Page() {
     [onIdentify],
   );
 
-  // Phase 9.6 — identify-from-crops. Same SSE-driven flow as onIdentify but
-  // the first stage is `validate` (OOD gate + FDI assignment + dedup), no
-  // panoramic preview, and no detect/fdi stages. Results render via the
-  // standard ResultsCards with `crops_mode=true` flipping the header copy.
+  // Identify-from-crops. Same SSE-driven flow as onIdentify but the first
+  // stage is `validate` (OOD gate + FDI assignment + dedup), no panoramic
+  // preview, and no detect/fdi stages. Results render via the standard
+  // ResultsCards with `crops_mode=true` flipping the header copy.
   const onIdentifyCrops = useCallback(
     async (files: File[], fdiOverrides: (string | null)[]) => {
       setBusy(true);
@@ -275,9 +275,9 @@ export default function Page() {
         />
       )}
 
-      {/* Phase 9.6 — input-mode tab strip. Switching wipes any in-flight
-          results so the user doesn't see panoramic state under a "Matched
-          from N crops" header. */}
+      {/* Input-mode tab strip. Switching wipes any in-flight results so the
+          user doesn't see panoramic state under a "Matched from N crops"
+          header. */}
       <div className="flex flex-wrap items-center gap-1 rounded-full border border-slate-200 bg-slate-100 p-0.5 text-xs dark:border-slate-700 dark:bg-slate-800 self-start">
         {(["panoramic", "crops"] as InputMode[]).map((tab) => {
           const active = inputMode === tab;
@@ -330,8 +330,8 @@ export default function Page() {
             }}
             onReset={tryAnother}
             onFragmentResult={(r) => {
-              // Phase 9.5 — merge fragment-search payload into the existing
-              // ResultsState so the verdict/calibration/list all re-render.
+              // Merge fragment-search payload into the existing ResultsState
+              // so the verdict/calibration/list all re-render.
               setResults((prev) =>
                 prev
                   ? {
@@ -349,16 +349,16 @@ export default function Page() {
                       // matches the rendered top-K.
                       expectedMatch: r.expected_match ?? null,
                       ageEstimate: r.age_estimate ?? prev.ageEstimate,
-                      // Phase 9.5.1 — fragment search recomputes contributions
-                      // against the *new* top-1. Use them when present; if the
-                      // backend returned [], clear prev's contributions rather
-                      // than retain dot products against the previous top-1.
+                      // Fragment search recomputes contributions against the
+                      // *new* top-1. Use them when present; if the backend
+                      // returned [], clear prev's contributions rather than
+                      // retain dot products against the previous top-1.
                       toothContributions: r.tooth_contributions ?? [],
-                      // Phase 9.9 — fragment search emits its own dropped:[]
-                      // (always empty since user-chosen subsets don't dedup).
-                      // n_dropped from the parent /identify run is also stale
-                      // — those duplicates were on the full set, not on this
-                      // user-chosen subset. Reset both together so the header
+                      // Fragment search emits its own dropped:[] (always empty
+                      // since user-chosen subsets don't dedup). n_dropped from
+                      // the parent /identify run is also stale — those
+                      // duplicates were on the full set, not on this user-
+                      // chosen subset. Reset both together so the header
                       // doesn't read "Queried with 4 teeth · 2 duplicates
                       // dropped" when the 4 chosen teeth had no dedup at all.
                       nDropped: r.n_dropped ?? 0,
@@ -417,8 +417,8 @@ function applyEvent(
           stage === "embed" && typeof evt.data.total === "number"
             ? { current: 0, total: evt.data.total }
             : prev.embedProgress,
-        // Phase 9.9 — reset the live FDI list when embed re-starts so a
-        // re-run doesn't show stale teeth from the previous query.
+        // Reset the live FDI list when embed re-starts so a re-run doesn't
+        // show stale teeth from the previous query.
         embeddedTeeth: stage === "embed" ? [] : prev.embeddedTeeth,
       }));
       return;
@@ -432,10 +432,10 @@ function applyEvent(
           current: evt.data.current,
           total: evt.data.total,
         },
-        // Phase 9.9 — append the slice of teeth just embedded. The backend
-        // batches ~4 per progress event; concatenate to build the running
-        // history, slicing to `current` so we never exceed the announced
-        // count even if the SSE replays a previously seen batch.
+        // Append the slice of teeth just embedded. The backend batches ~4
+        // per progress event; concatenate to build the running history,
+        // slicing to `current` so we never exceed the announced count even
+        // if the SSE replays a previously seen batch.
         embeddedTeeth: [
           ...(prev.embeddedTeeth ?? []),
           ...newlyEmbedded,
@@ -462,14 +462,14 @@ function applyEvent(
           timings: evt.data.timings_ms ?? {},
           nQueryTeeth: evt.data.n_query_teeth ?? 0,
           nDropped: evt.data.n_dropped ?? 0,
-          // Phase 9.9 — backend search-stage payload now carries a structured
-          // list. Default to [] so the UI's narrative ("0 dropped" path)
-          // doesn't tip into "unknown" just because the payload omits it.
+          // Backend search-stage payload carries a structured list. Default
+          // to [] so the UI's narrative ("0 dropped" path) doesn't tip into
+          // "unknown" just because the payload omits it.
           dropReasons: evt.data.dropped ?? [],
           toothContributions: evt.data.tooth_contributions,
           selectedPersonId: selected?.person_id,
           selectedFakeName: selected?.fake_name,
-          // Phase 9.3 — calibrated open-set + provenance from the backend.
+          // Calibrated open-set + provenance from the backend.
           openSetScore: evt.data.open_set_score ?? null,
           openSetDecision: evt.data.open_set_decision ?? "unknown",
           openSetThreshold: evt.data.open_set_threshold ?? null,
@@ -477,14 +477,13 @@ function applyEvent(
           expectedPersonId: evt.data.expected_person_id ?? null,
           expectedMatch: evt.data.expected_match ?? null,
           ageEstimate: evt.data.age_estimate ?? null,
-          // Phase 9.5 — fragment-search support.
           queryId: evt.data.query_id ?? null,
           perTooth: perTooth ?? [],
-          // Phase 9.6 — backend sets crops_mode=true on the search event for
+          // Backend sets crops_mode=true on the search event for
           // /api/identify-crops; the results header flips its copy.
           cropsMode: evt.data.crops_mode ?? false,
-          // Phase 9.6.1 — per-input-crop outcomes (auto-FDI label, OOD,
-          // dup). Only populated on the crops path; absent otherwise.
+          // Per-input-crop outcomes (auto-FDI label, OOD, dup). Only
+          // populated on the crops path; absent otherwise.
           perCrop: evt.data.per_crop,
         });
         setPipeline((prev) => ({ ...prev, status: "Done." }));

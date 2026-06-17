@@ -19,12 +19,12 @@ export type SearchResult = {
   fake_name: string;
   n_teeth: number | null;
   similarity: number;
-  // Phase 9.7 — true when this result came from the caller's session
-  // enrolments rather than the canonical 1,178-person registry.
+  // True when this result came from the caller's session enrolments rather
+  // than the canonical 1,178-person registry.
   is_session?: boolean;
 };
 
-// Phase 9.2 — Phase 8.6 locked open-set decision.
+// Locked open-set decision.
 export type OpenSetDecision = "in_registry" | "rejected" | "unknown";
 
 // Provenance of the uploaded query.
@@ -40,9 +40,9 @@ export type QueryProvenance =
   | "novel"
   | "unknown";
 
-// Phase 9.9 — embed-stage progress events now carry the FDI labels +
-// confidences of teeth just embedded, so the UI can show "13, 12, 11…" live
-// instead of an opaque counter.
+// Embed-stage progress events carry the FDI labels + confidences of teeth
+// just embedded, so the UI can show "13, 12, 11…" live instead of an
+// opaque counter.
 export type EmbedProgressItem = {
   fdi: string;
   fdi_confidence: number;
@@ -67,8 +67,8 @@ export type StageEvent =
 export type ToothContribution = {
   fdi: string;
   fdi_confidence: number;
-  // Phase 9.9 — null for the crops path (no YOLO) and for cached fragment
-  // queries written before the cache schema was widened; UI renders em-dash.
+  // Null for the crops path (no YOLO) and for cached fragment queries
+  // written before the cache schema was widened; UI renders em-dash.
   yolo_confidence?: number | null;
   similarity_to_top1: number;
 };
@@ -84,9 +84,9 @@ export type ExpectedMatch = {
   person_id: string;
 };
 
-// Phase 9.9 — structured drop record (one entry per tooth lost to FDI dedup).
-// Replaces the bare `n_dropped` count on the search-stage payload while
-// preserving the count for compact summaries.
+// Structured drop record (one entry per tooth lost to FDI dedup). Replaces
+// the bare `n_dropped` count on the search-stage payload while preserving
+// the count for compact summaries.
 export type DropReason = {
   fdi: string;
   reason: "duplicate";
@@ -101,8 +101,8 @@ export type StageCompleteData = {
   n_teeth?: number;
   n_uncertain?: number;
   n_dropped?: number;
-  // Phase 9.9 — structured drop list (added on `fdi` and `search` stage_complete
-  // events; absent on others).
+  // Structured drop list (added on `fdi` and `search` stage_complete events;
+  // absent on others).
   dropped?: DropReason[];
   n_embeddings?: number;
   annotated_image_url?: string;
@@ -113,23 +113,23 @@ export type StageCompleteData = {
   n_query_teeth?: number;
   elapsed_ms?: number;
   tooth_contributions?: ToothContribution[];
-  // Phase 9.2/9.3 — calibrated open-set + provenance (locked Phase 8.6 cal).
+  // Calibrated open-set + provenance (locked calibration).
   open_set_score?: number | null;
   open_set_decision?: OpenSetDecision;
   open_set_threshold?: number | null;
   query_provenance?: QueryProvenance;
   expected_person_id?: string | null;
   expected_match?: ExpectedMatch | null;
-  // Phase 9.4 — Phase 8.10 age estimate (sex head NOT wired; failed Pass).
+  // Age estimate (sex head NOT wired; failed marginal-accuracy floor).
   age_estimate?: AgeEstimate | null;
-  // Phase 9.5 — emitted on `embed` and `search` stage_complete events. Used
-  // by FragmentSelector to cache the query embeddings per query_id, then
-  // POST /api/search-fragment for sub-100ms re-pooling on a subset.
+  // Emitted on `embed` and `search` stage_complete events. Used by
+  // FragmentSelector to cache the query embeddings per query_id, then POST
+  // /api/search-fragment for sub-100ms re-pooling on a subset.
   query_id?: string;
   per_tooth?: PerTooth[];
-  // Phase 9.6 — pre-cropped tooth upload. `validate` stage replaces
-  // detect/fdi for the crops path; `crops_mode` is set on the search-stage
-  // event so the UI can switch the results-header copy.
+  // Pre-cropped tooth upload. `validate` stage replaces detect/fdi for the
+  // crops path; `crops_mode` is set on the search-stage event so the UI can
+  // switch the results-header copy.
   n_uploaded?: number;
   n_failed_ood?: number;
   n_kept?: number;
@@ -138,7 +138,7 @@ export type StageCompleteData = {
   crops_mode?: boolean;
 };
 
-// Phase 9.6 — per-input-crop record emitted by the validate stage.
+// Per-input-crop record emitted by the validate stage.
 export type PerCrop = {
   input_index: number;
   auto_fdi: string;
@@ -167,19 +167,19 @@ export type AgeEstimate = {
   training_range: [number, number];
 };
 
-// Phase 9.5 — per-tooth metadata emitted by the embed stage so the frontend
-// can let the user pick a subset for re-search.
+// Per-tooth metadata emitted by the embed stage so the frontend can let the
+// user pick a subset for re-search.
 export type PerTooth = {
   index: number;
   fdi: string;
   fdi_confidence: number;
-  // Phase 9.9 — surfaced in the technical-details per-tooth table. Optional
-  // for back-compat with the crops path (no YOLO involved).
+  // Surfaced in the technical-details per-tooth table. Optional for back-
+  // compat with the crops path (no YOLO involved).
   yolo_confidence?: number | null;
   bbox: [number, number, number, number];
 };
 
-// Phase 9.5 — POST /api/search-fragment payload shape (mirrors search-stage data).
+// POST /api/search-fragment payload shape (mirrors search-stage data).
 export type FragmentSearchResponse = StageCompleteData & {
   query_id: string;
   tooth_indices: number[];
@@ -214,7 +214,7 @@ export async function fetchRegistry(): Promise<RegistryListResponse> {
   return res.json();
 }
 
-// ---------- Phase 9.7 — session enrolment ----------
+// ---------- Session enrolment ----------
 
 const SESSION_STORAGE_KEY = "dental-demo.session_id";
 

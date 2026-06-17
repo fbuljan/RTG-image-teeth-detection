@@ -1,5 +1,5 @@
 """
-Phase 9.7 — Session-scoped enrolment storage.
+Session-scoped enrolment storage.
 
 A session is a directory under ``backend/sessions/{session_id}/`` containing
 the same three files as a canonical registry::

@@ -9,12 +9,12 @@ import {
   type SessionEnrolment,
 } from "@/lib/api";
 
-// Phase 9.7 — "Your enrolments (this session)" panel.
+// "Your enrolments (this session)" panel.
 //
 // Lists the caller's session enrolments and exposes per-row delete + a
 // "Clear all" button. Polled on mount and whenever the parent bumps the
-// `refreshNonce`. Shows the 24h-scope disclaimer prominently so a thesis
-// viewer doesn't mistake this for persistent storage.
+// `refreshNonce`. Shows the 24h-scope disclaimer prominently so a viewer
+// doesn't mistake this for persistent storage.
 
 export function SessionEnrolments({
   sessionId,

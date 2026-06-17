@@ -4,9 +4,9 @@ import { intermediateUrl } from "@/lib/api";
 
 export type StageState = "idle" | "active" | "done";
 
-// Phase 9.9 — chronological log of teeth that have been embedded so far.
-// `embedded` is the per-progress-event slice (last 1-4 teeth); the parent
-// builds the running history by concatenation.
+// Chronological log of teeth that have been embedded so far. `embedded` is
+// the per-progress-event slice (last 1-4 teeth); the parent builds the
+// running history by concatenation.
 export type EmbeddedTooth = {
   fdi: string;
   fdi_confidence: number;
@@ -22,14 +22,14 @@ export type PipelineState = {
   error?: string;
   currentImageUrl: string | null;
   embedProgress?: { current: number; total: number };
-  // Phase 9.9 — running list of embedded teeth (FDI + conf) updated live as
-  // the embed stage progresses, so users can see numbering decisions in real
-  // time instead of an opaque "11/16" counter.
+  // Running list of embedded teeth (FDI + conf) updated live as the embed
+  // stage progresses, so users can see numbering decisions in real time
+  // instead of an opaque "11/16" counter.
   embeddedTeeth?: EmbeddedTooth[];
   toothCount?: number;
   mode: "detection" | "segmentation";
-  // Phase 9.6 — when true, stageA label becomes "Validate" and the FDI
-  // stage is hidden (validate folds FDI assignment + dedup + OOD gate).
+  // When true, stageA label becomes "Validate" and the FDI stage is hidden
+  // (validate folds FDI assignment + dedup + OOD gate).
   cropsMode?: boolean;
 };
 
@@ -74,8 +74,8 @@ export function PipelineProgress({ state }: Props) {
         </div>
         <ol className="flex items-center gap-2 text-xs">
           {STAGE_KEYS.filter(({ key }) =>
-            // Phase 9.6 — crops mode folds FDI into validate; hide the FDI
-            // pill so the bar reads "Validate ✓ — Embed ✓ — Search ✓".
+            // Crops mode folds FDI into validate; hide the FDI pill so the
+            // bar reads "Validate ✓ — Embed ✓ — Search ✓".
             !(state.cropsMode && key === "fdi")
           ).map(({ key }) => {
             const stage = state[key] as StageState;
@@ -115,7 +115,7 @@ export function PipelineProgress({ state }: Props) {
           </p>
         )}
 
-        {/* Phase 9.9 — live FDI confidence list while embed stage is running. */}
+        {/* Live FDI confidence list while embed stage is running. */}
         {state.embed === "active" && state.embeddedTeeth && state.embeddedTeeth.length > 0 && (
           <div className="mt-4">
             <h4 className="mb-2 text-center text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">

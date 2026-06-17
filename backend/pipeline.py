@@ -45,9 +45,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _default_registry_dir() -> Path:
-    """Phase 9.1 — default to the YOLO-built registry to match the Phase 8.0
-    canonical baseline (R1 = 82.6% [79.8, 86.0]). Honour DEMO_USE_YOLO_REGISTRY=0
-    for one-line rollback to the legacy GT-built registry (R1 ≈ 57.3%).
+    """Default to the YOLO-built registry to match the canonical baseline
+    (R1 = 82.6% [79.8, 86.0]). Honour DEMO_USE_YOLO_REGISTRY=0 for one-line
+    rollback to the legacy GT-built registry (R1 ≈ 57.3%).
     """
     if os.environ.get("DEMO_USE_YOLO_REGISTRY", "1") == "0":
         return PROJECT_ROOT / "identification/registry"
@@ -72,8 +72,8 @@ class PipelineConfig:
         "fdi_init": PROJECT_ROOT / "identification/runs/embedding_fdi_init_v1/best.pt",
     })
     # Ensemble registries are built from YOLO-extracted crops so the query
-    # distribution matches what the demo feeds in at inference. See Phase 7.1
-    # "Deployment caveat" in thesis_notes.md for the full story.
+    # distribution matches what the demo feeds in at inference. See the
+    # "Deployment caveat" section in thesis_notes.md for the full story.
     ensemble_registry_dir: Path = PROJECT_ROOT / "identification/registry_ensemble_yolo"
     temp_dir: Path = PROJECT_ROOT / "backend/temp"
     sessions_dir: Path = PROJECT_ROOT / "backend/sessions"
@@ -111,13 +111,13 @@ class PipelineModels:
     embedder_fdi_label_map: dict[str, int] = field(default_factory=dict)
     registry_index: RetrievalIndex | None = None
     registry_meta: dict[str, dict] = field(default_factory=dict)
-    # Phase 9.2 — Phase 8.6 open-set calibration (locked) + provenance hash index.
+    # Locked open-set calibration + provenance hash index.
     open_set_calibration: dict | None = None
     panoramic_sha256_to_pid: dict[str, str] = field(default_factory=dict)
-    # Phase 9.3 — sorted in_registry / oos sim_top1 arrays for percentile lookup.
+    # Sorted in_registry / oos sim_top1 arrays for percentile lookup.
     sim_top1_in_registry_sorted: np.ndarray | None = None
     sim_top1_oos_sorted: np.ndarray | None = None
-    # Phase 9.4 — Phase 8.10 age head (sex head NOT wired; failed Pass).
+    # Age regression head (sex head NOT wired; failed the marginal-accuracy floor).
     age_head: torch.nn.Module | None = None
     # Ensemble: parallel arrays of
     # (name, model, uses_metadata, fdi_label_map, crop_mode)
@@ -174,8 +174,8 @@ class PipelineModels:
         self.registry_meta = {p["person_id"]: p for p in payload["persons"]}
         print(f"[pipeline] registry size: {len(self.registry_index)} persons")
 
-        # 4b. Phase 8.6 open-set calibration — load the locked threshold + z-score
-        # stats so the pipeline can emit a calibrated open-set decision per query.
+        # 4b. Open-set calibration — load the locked threshold + z-score stats
+        # so the pipeline can emit a calibrated open-set decision per query.
         calib_path = PROJECT_ROOT / "identification/runs/phase8_open_set/phase8_open_set_calibration.json"
         if calib_path.exists():
             with open(calib_path) as f:
@@ -185,9 +185,9 @@ class PipelineModels:
         else:
             print(f"[pipeline] WARN: open-set calibration not found at {calib_path}; open_set_decision will be 'unknown'")
 
-        # 4b-bis. Phase 9.3 — load held-out enrolment records to build percentile
-        # lookup tables. Lets us show "your sim_top1 is at the 73rd percentile
-        # of correct identifications" instead of bare cosine.
+        # 4b-bis. Load held-out enrolment records to build percentile lookup
+        # tables. Lets us show "your sim_top1 is at the 73rd percentile of
+        # correct identifications" instead of bare cosine.
         heldout_path = PROJECT_ROOT / "identification/runs/phase8_deployed_yolo_reg/heldout_enrol.json"
         if heldout_path.exists():
             with open(heldout_path) as f:
@@ -206,10 +206,9 @@ class PipelineModels:
         else:
             print(f"[pipeline] WARN: heldout_enrol.json not found at {heldout_path}; percentile field will be null")
 
-        # 4b-ter. Phase 9.4 — Phase 8.10 age regression head on the frozen
-        # embedder. Sex head intentionally NOT loaded (Phase 8.10 pre-registered
-        # rule: sex acc 0.556 ≈ chance baseline 0.539, fails the 0.65 marginal
-        # floor; wiring would mislead users).
+        # 4b-ter. Age regression head on the frozen embedder. Sex head
+        # intentionally NOT loaded (sex acc 0.556 ≈ chance baseline 0.539, fails
+        # the 0.65 marginal floor; wiring would mislead users).
         age_head_path = PROJECT_ROOT / "identification/runs/demographic_v2/age_head.pt"
         if age_head_path.exists():
             try:
@@ -218,15 +217,15 @@ class PipelineModels:
                 head.load_state_dict(state)
                 head.to(self.device).eval()
                 self.age_head = head
-                print(f"[pipeline] Phase 8.10 age head loaded from {age_head_path}")
+                print(f"[pipeline] age head loaded from {age_head_path}")
             except Exception as exc:  # noqa: BLE001 — degrade gracefully
                 print(f"[pipeline] WARN: failed to load age head: {exc}")
         else:
             print(f"[pipeline] WARN: age head not found at {age_head_path}; age estimate will be null")
 
-        # 4c. Phase 9.2 provenance — precompute SHA-256 of every registry
-        # panoramic so we can flag self-match queries (re-uploads of an enrolled
-        # image) vs novel uploads in the API response.
+        # 4c. Provenance — precompute SHA-256 of every registry panoramic so we
+        # can flag self-match queries (re-uploads of an enrolled image) vs novel
+        # uploads in the API response.
         self.panoramic_sha256_to_pid = {}
         n_hashed = 0
         for pid, meta in self.registry_meta.items():
@@ -384,16 +383,17 @@ def _confidence_label(top1: float, top2: float) -> str:
 
 
 def _open_set_score(top1_sim: float, calibration: dict | None) -> tuple[float | None, str]:
-    """Phase 8.6 locked open-set scoring.
+    """Locked open-set scoring.
 
     Returns (z_scored_sim_top1, decision) where decision is one of:
         "in_registry"  — score >= threshold (probably enrolled)
         "rejected"     — score <  threshold (probably not enrolled)
         "unknown"      — calibration not loaded (fail-open: never rejects)
 
-    The locked calibration's `mode` is `sim_top1_only` with weights `[1, 0, 0, 0, 0]`
-    over z-scored features. The fallback rule fired during Phase 8.6 because
-    the 5-feature LR did not lift AUROC by >= 0.030 over sim-only on val.
+    The locked calibration's `mode` is `sim_top1_only` with weights
+    `[1, 0, 0, 0, 0]` over z-scored features. The fallback rule fired during
+    calibration because the 5-feature LR did not lift AUROC by >= 0.030 over
+    sim-only on val.
     """
     if not calibration:
         return None, "unknown"
@@ -415,14 +415,13 @@ def _estimate_age(
     pool_size: int,
     open_set_decision: str,
 ) -> dict | None:
-    """Phase 9.5.1 — honest age estimate.
+    """Honest age estimate.
 
     Gate emission on the open-set verdict (rejected queries get no age — the
-    embedder is out of distribution, the head's output is meaningless). Drop
-    the prediction-driven "in_dense_bucket" CI tightening from Phase 9.4 — the
-    dense-bucket MAE in Phase 8.10 was conditioned on *ground-truth* age, and
-    at inference we don't have the ground truth. A 17-year-old whose embedding
-    saturates the head to 10.5y would otherwise inherit the tight CI and
+    embedder is out of distribution, the head's output is meaningless). The
+    dense-bucket MAE we'd otherwise use to tighten the CI was conditioned on
+    *ground-truth* age, and at inference we don't have it — a 17-year-old whose
+    embedding saturates the head to 10.5y would inherit the tight CI and
     confident styling. Instead: always use a single conservative CI, clamp the
     *displayed* value to the training range [6, 18] with a saturation flag,
     and widen further on small pools (the head was trained on per-person mean
@@ -440,9 +439,9 @@ def _estimate_age(
 
     train_lo, train_hi = 6.0, 18.0
     # Saturation: either the head hit a training-range boundary, or the
-    # ground-truth-conditional Phase 8.10 dense-MAE never applied here. We
-    # treat anything outside [6, 13) as elevated risk since per-bucket MAE
-    # climbed to 2.09y in 16-18y.
+    # ground-truth-conditional dense-MAE never applied here. We treat anything
+    # outside [6, 13) as elevated risk since per-bucket MAE climbed to 2.09y
+    # in 16-18y.
     saturated = pred_raw <= train_lo + 0.05 or pred_raw >= train_hi - 0.05
     elevated_risk = saturated or pred_raw < 6.0 or pred_raw >= 13.0
     small_pool = pool_size < 8
@@ -473,10 +472,10 @@ def _estimate_age(
 def _sim_top1_percentile(
     sim: float, sorted_arr: np.ndarray | None,
 ) -> float | None:
-    """Phase 9.3 — what fraction of reference sim_top1 values are below this one?
+    """What fraction of reference sim_top1 values are below this one?
 
-    With `sorted_arr` = sorted in-registry sim_top1s (740 values from Phase 8.6
-    held-out enrolment), the returned percentile answers "of all *correct*
+    With `sorted_arr` = sorted in-registry sim_top1s (740 values from the
+    held-out enrolment eval), the returned percentile answers "of all *correct*
     identifications in the test eval, what fraction had a lower sim than this
     query?" — a far more legible signal than raw cosine.
     """
@@ -498,7 +497,7 @@ def _build_search_payload(
     yolo_conf_used: list[float] | None = None,
     session_id: str | None = None,
 ) -> dict:
-    """Phase 9.5 — shared search-stage payload builder for /api/identify and
+    """Shared search-stage payload builder for /api/identify and
     /api/search-fragment. Takes a pooled+L2-normalised query vector and returns
     the same JSON shape the SSE search event emits.
 
@@ -509,10 +508,9 @@ def _build_search_payload(
 
     `session_id` enables session-enrolment merge — mirror of `run_pipeline`'s
     merge. Without it, fragment search would silently drop session candidates
-    the parent identify just placed at rank #1 (the bug fixed in this patch).
-    Calibrated quantities (open_set, top1_top2_gap, confidence) stay
-    canonical-only because the Phase 8.6 thresholds were learned on that
-    distribution.
+    the parent identify just placed at rank #1. Calibrated quantities
+    (open_set, top1_top2_gap, confidence) stay canonical-only because the
+    locked thresholds were learned on that distribution.
     """
     sims, neighbor_ids = models.registry_index.search(query_vec, k=config.top_k)
     canonical_results: list[dict] = []
@@ -581,7 +579,7 @@ def _build_search_payload(
     # parent /identify run uses its own block further down with the full
     # embeddings_arr; passing sub_embs here lets fragment search emit a
     # contributions panel that actually matches the new top-1 it just selected
-    # (audit fix — without this, the frontend retains the original /identify
+    # (without this, the frontend would retain the original /identify
     # contributions, which were dot products against the OLD top-1).
     tooth_contributions: list[dict] = []
     if sub_embs is not None and len(sub_embs) == len(fdi_used) and len(results_list) > 0:
@@ -594,9 +592,9 @@ def _build_search_payload(
                 tooth_contributions.append({
                     "fdi": fdi,
                     "fdi_confidence": fdi_conf_used[i],
-                    # Phase 9.9 — YOLO conf when caller supplied it (fragment
-                    # path threads it from teeth.npz cache; older callers omit
-                    # → null surfaced as em-dash in the UI).
+                    # YOLO conf when caller supplied it (fragment path threads
+                    # it from teeth.npz cache; older callers omit → null
+                    # surfaced as em-dash in the UI).
                     "yolo_confidence": (
                         float(yolo_conf_used[i])
                         if yolo_conf_used is not None and i < len(yolo_conf_used)
@@ -608,7 +606,7 @@ def _build_search_payload(
         except Exception:
             tooth_contributions = []
 
-    # Age estimate — gated on open_set_decision and pool size (Phase 9.5.1).
+    # Age estimate — gated on open_set_decision and pool size.
     age_estimate = _estimate_age(
         age_head=models.age_head,
         device=models.device,
@@ -629,8 +627,8 @@ def _build_search_payload(
         "timings_ms": {},  # search-fragment is sub-ms; left empty intentionally
         "n_query_teeth": int(len(fdi_used)),
         "n_dropped": 0,
-        # Phase 9.9 — empty list so the UI consistently sees an array (no
-        # fragment-search drops happen; the subset is user-chosen).
+        # Empty list so the UI consistently sees an array (no fragment-search
+        # drops happen; the subset is user-chosen).
         "dropped": [],
         "tooth_contributions": tooth_contributions,
         "ensemble": False,
@@ -657,7 +655,7 @@ def run_fragment_search(
     config: PipelineConfig,
     session_id: str | None = None,
 ) -> dict:
-    """Phase 9.5 — re-pool a subset of cached tooth embeddings and re-search.
+    """Re-pool a subset of cached tooth embeddings and re-search.
 
     Loads the teeth.npz cached during the parent /api/identify run for query_id,
     selects the requested indices, mean-pools + L2-normalises, runs FAISS search,
@@ -671,10 +669,10 @@ def run_fragment_search(
     all_embs: np.ndarray = data["embeddings"]
     all_fdi = [str(x) for x in data["fdi"]]
     all_fdi_conf = [float(x) for x in data["fdi_conf"]]
-    # Phase 9.9 — yolo_conf is optional in the cache for back-compat with
-    # queries cached before 9.9. When absent, we pass `None` to the builder so
-    # the per-tooth table renders em-dashes — emitting 0.0 would be a lie
-    # (every detection had SOME confidence; we just didn't cache it).
+    # yolo_conf is optional in the cache for back-compat with older queries.
+    # When absent, we pass `None` to the builder so the per-tooth table renders
+    # em-dashes — emitting 0.0 would be a lie (every detection had SOME
+    # confidence; we just didn't cache it).
     has_yolo_conf = "yolo_conf" in data.files
     if has_yolo_conf:
         all_yolo_conf = [float(x) for x in data["yolo_conf"]]
@@ -742,7 +740,7 @@ def compute_query_vector_sync(
     models: PipelineModels,
     mode: str = "segmentation",
 ) -> dict:
-    """Phase 9.7 — non-streaming Stage A→E for the enrolment endpoint.
+    """Non-streaming Stage A→E for the enrolment endpoint.
 
     Runs the same single-model path as ``run_pipeline`` (YOLO → bbox crops →
     FDI classification + dedup → ResNet embedder → mean+L2 pool) but as a
@@ -868,13 +866,13 @@ def compute_query_vector_sync(
     }
 
 
-# Phase 9.6 — OOD heuristic. The FDI classifier's argmax softmax is a cheap
-# proxy for "this looks like a tooth crop." Tooth crops typically score
-# >0.5; non-tooth photos collapse close to uniform over the 32-class
-# distribution (~0.03). A panoramic dropped into the crops tab scored 0.36
-# in audit testing — well below a real crop, but above the original 0.25
-# floor. Tightened to 0.45 to refuse panoramic-as-crop while still admitting
-# legitimately-noisy wisdom-tooth crops (conf ~0.5+).
+# OOD heuristic. The FDI classifier's argmax softmax is a cheap proxy for
+# "this looks like a tooth crop." Tooth crops typically score >0.5; non-tooth
+# photos collapse close to uniform over the 32-class distribution (~0.03).
+# A panoramic dropped into the crops tab scored 0.36 in testing — well below
+# a real crop, but above the original 0.25 floor. Tightened to 0.45 to refuse
+# panoramic-as-crop while still admitting legitimately-noisy wisdom-tooth
+# crops (conf ~0.5+).
 FDI_OOD_MAX_SOFTMAX = 0.45
 # Single-tooth panoramic crops in this dataset are ≤512 px on the long
 # edge; a full panoramic is 1600+. If the long edge exceeds this, refuse the
@@ -899,7 +897,7 @@ def compute_query_vector_from_crops(
     models: PipelineModels,
     fdi_overrides: list[str | None] | None = None,
 ) -> dict:
-    """Phase 9.6 — Stages C→D→E for pre-cropped tooth uploads.
+    """Stages C→D→E for pre-cropped tooth uploads.
 
     Skips YOLO and per-panoramic cropping. Accepts an ordered list of PIL
     ``Image`` instances (each one a single tooth crop) plus an optional
@@ -1093,7 +1091,7 @@ async def run_pipeline(
         during embedder training).
 
     `ensemble` switches between a single embedder (default, FDI-init) and a
-    score-level ensemble of all four trained embedders (Phase 7.1).
+    score-level ensemble of all four trained embedders.
     """
     cfg = models.config
     device = models.device
@@ -1260,9 +1258,9 @@ async def run_pipeline(
         [polygons[i] for i in keep_indices] if polygons else None
     )
 
-    # Phase 9.9 — structured drop list so the UI can explain *why* each tooth
-    # was dropped (currently the only reason is "FDI duplicate"; the winner +
-    # both confidences let users see the dedup decision).
+    # Structured drop list so the UI can explain *why* each tooth was dropped
+    # (currently the only reason is "FDI duplicate"; the winner + both
+    # confidences let users see the dedup decision).
     dropped_detail: list[dict] = []
     for d in dropped:
         idx = d["index"]
@@ -1291,7 +1289,7 @@ async def run_pipeline(
     )
     timings["fdi"] = (time.perf_counter() - t0) * 1000
 
-    # Phase 9.9 — dropped[] is the structured drop list (kept count via n_dropped).
+    # `dropped[]` is the structured drop list (count via n_dropped).
     # NOTE: per_kept (per-kept-tooth FDI+conf+YOLO list) is intentionally NOT
     # emitted from this stage_complete — the same data flows live through the
     # `embed` progress events (the "Embedded so far" panel), which is the
@@ -1329,7 +1327,7 @@ async def run_pipeline(
     # In single mode we run one embedder per crop. In ensemble mode we run
     # every loaded embedder per crop and keep the per-model embedding arrays
     # separate; aggregation + search happen per-model and are combined at the
-    # similarity-matrix level (Phase 7.1 score-level ensemble).
+    # similarity-matrix level (score-level ensemble).
     t0 = time.perf_counter()
     yield {
         "event": "stage_start",
@@ -1350,10 +1348,9 @@ async def run_pipeline(
         per_model_embeddings: list[list[np.ndarray]] = [
             [] for _ in models.ensemble_models
         ]
-        # Phase 9.9 — track index of last-emitted tooth so the embed-progress
-        # `embedded` slice is exclusive of prior batches and includes every
-        # tooth exactly once, even when n_teeth is not a multiple of the
-        # batch size.
+        # Track index of last-emitted tooth so the embed-progress `embedded`
+        # slice is exclusive of prior batches and includes every tooth exactly
+        # once, even when n_teeth is not a multiple of the batch size.
         last_emitted = 0
         # Pre-compute raw and masked tensors once per tooth.
         with torch.no_grad():
@@ -1378,9 +1375,9 @@ async def run_pipeline(
                         emb = model(tensor)
                     per_model_embeddings[j].append(emb.cpu().numpy()[0])
                 if (i + 1) % 4 == 0 or i == len(crops_kept) - 1:
-                    # Phase 9.9 — emit FDI labels embedded since the previous
-                    # progress event so the running list contains each tooth
-                    # exactly once regardless of n_teeth modulo batch size.
+                    # Emit FDI labels embedded since the previous progress
+                    # event so the running list contains each tooth exactly
+                    # once regardless of n_teeth modulo batch size.
                     yield {
                         "event": "progress",
                         "data": {
@@ -1409,7 +1406,7 @@ async def run_pipeline(
         embeddings_arr = ensemble_emb_arrays[canonical_idx]
     else:
         embeddings = []
-        # Phase 9.9 — see ensemble branch comment above re last_emitted.
+        # See ensemble branch comment above re last_emitted.
         last_emitted = 0
         with torch.no_grad():
             for i, (crop, fdi) in enumerate(zip(crops_kept, fdi_kept)):
@@ -1424,7 +1421,7 @@ async def run_pipeline(
                     emb = models.embedder(tensor)
                 embeddings.append(emb.cpu().numpy()[0])
                 if (i + 1) % 4 == 0 or i == len(crops_kept) - 1:
-                    # Phase 9.9 — see ensemble branch above.
+                    # See ensemble branch above.
                     yield {
                         "event": "progress",
                         "data": {
@@ -1447,17 +1444,17 @@ async def run_pipeline(
 
     timings["embed"] = (time.perf_counter() - t0) * 1000
 
-    # Phase 9.5 — cache per-tooth embeddings + FDI + bboxes so the fragment
-    # explorer can re-pool an arbitrary subset without re-running detection.
+    # Cache per-tooth embeddings + FDI + bboxes so the fragment explorer can
+    # re-pool an arbitrary subset without re-running detection.
     try:
         np.savez(
             query_dir / "teeth.npz",
             embeddings=embeddings_arr,
             fdi=np.array(fdi_kept, dtype=object),
             fdi_conf=np.array(fdi_conf_kept, dtype=np.float32),
-            # Phase 9.9 — cache YOLO conf alongside FDI conf so the fragment
-            # explorer's per-tooth contribution table can show both columns
-            # consistently with the parent /identify run.
+            # Cache YOLO conf alongside FDI conf so the fragment explorer's
+            # per-tooth contribution table can show both columns consistently
+            # with the parent /identify run.
             yolo_conf=np.array(yolo_conf_kept, dtype=np.float32),
             bboxes=bboxes_kept,
         )
@@ -1472,10 +1469,9 @@ async def run_pipeline(
             "elapsed_ms": round(timings["embed"], 1),
             "ensemble": ensemble,
             "ensemble_members": [m[0] for m in models.ensemble_models] if ensemble else None,
-            # Phase 9.5 — per-tooth metadata so the frontend FragmentSelector
-            # can render clickable tooth boxes on the annotated overlay.
-            # Phase 9.9 — also expose yolo_confidence (already extracted at
-            # Stage A, previously discarded).
+            # Per-tooth metadata so the frontend FragmentSelector can render
+            # clickable tooth boxes on the annotated overlay; yolo_confidence
+            # is also exposed (already extracted at Stage A).
             "per_tooth": [
                 {
                     "index": i,
@@ -1546,12 +1542,12 @@ async def run_pipeline(
         sims, neighbor_ids = models.registry_index.search(query_vec, k=cfg.top_k)
     timings["search"] = (time.perf_counter() - t0) * 1000
 
-    # Phase 9.7 — merge session enrolments (if any) by raw cosine. Session
-    # results carry a `is_session=True` flag downstream so the UI can badge
-    # them. We assemble in-place rather than reordering arrays because the
-    # downstream tooth-contribution / open-set blocks expect `sims` to remain
-    # the canonical-only ranking (sim_top1 calibration was learned on canonical
-    # data and would be invalid if session enrolments displaced it).
+    # Merge session enrolments (if any) by raw cosine. Session results carry an
+    # `is_session=True` flag downstream so the UI can badge them. We assemble
+    # in-place rather than reordering arrays because the downstream tooth-
+    # contribution / open-set blocks expect `sims` to remain the canonical-only
+    # ranking (sim_top1 calibration was learned on canonical data and would be
+    # invalid if session enrolments displaced it).
     session_meta_by_pid: dict[str, dict] = {}
     session_results: list[dict] = []
     if session_id is not None:
@@ -1613,7 +1609,7 @@ async def run_pipeline(
 
     # Calibrated quantities — `top1_top2_gap`, `confidence`, `open_set_*`,
     # `age_estimate` — are all computed off the CANONICAL top-1 / top-2
-    # (sims[0], sims[1]). The Phase 8.6 thresholds were learned on canonical
+    # (sims[0], sims[1]). The locked thresholds were learned on canonical
     # pairs; extending them to session entries would invalidate the
     # calibration semantics. The session-merge contract is "session entries
     # may displace canonical entries in the visible ranking, but calibrated
@@ -1623,10 +1619,10 @@ async def run_pipeline(
     top1_top2_gap = canonical_top1 - canonical_top2 if len(sims) > 1 else 1.0
     confidence = _confidence_label(canonical_top1, canonical_top2)
 
-    # Phase 9.2 — Phase 8.6 calibrated open-set decision + provenance.
-    # Always computed on the CANONICAL top-1 (sims[0]), never on a session
-    # self-match — calibration was learned on the canonical 1,178-person
-    # distribution and is not transferable to session enrolments.
+    # Calibrated open-set decision + provenance. Always computed on the
+    # CANONICAL top-1 (sims[0]), never on a session self-match — calibration
+    # was learned on the canonical 1,178-person distribution and is not
+    # transferable to session enrolments.
     open_set_score, open_set_decision = _open_set_score(
         float(sims[0]), models.open_set_calibration,
     )
@@ -1647,7 +1643,7 @@ async def run_pipeline(
         query_provenance = "session_self_match"
         expected_pid = results_list[0]["person_id"]
 
-    # Phase 9.5.1 — age estimate, gated on open_set_decision and pool size.
+    # Age estimate, gated on open_set_decision and pool size.
     age_estimate = _estimate_age(
         age_head=models.age_head,
         device=models.device,
@@ -1657,8 +1653,8 @@ async def run_pipeline(
     )
     # Per-tooth contribution: dot each tooth's embedding against the top-1
     # gallery profile. In ensemble mode we average the per-model contributions.
-    # Phase 9.7 — when the top-1 is a session enrolment, reconstruct from the
-    # session index instead of the canonical one.
+    # When the top-1 is a session enrolment, reconstruct from the session
+    # index instead of the canonical one.
     tooth_contributions: list[dict] = []
     try:
         top1_person = results_list[0]["person_id"]
@@ -1689,7 +1685,7 @@ async def run_pipeline(
             tooth_contributions.append({
                 "fdi": fdi,
                 "fdi_confidence": fdi_conf_kept[i],
-                # Phase 9.9 — surface YOLO detection conf alongside FDI conf.
+                # Surface YOLO detection conf alongside FDI conf.
                 "yolo_confidence": yolo_conf_kept[i],
                 "similarity_to_top1": float(per_tooth_sims[i]),
             })
@@ -1709,13 +1705,13 @@ async def run_pipeline(
             "timings_ms": {k: round(v, 1) for k, v in timings.items()},
             "n_query_teeth": int(len(embeddings_arr)),
             "n_dropped": len(dropped),
-            # Phase 9.9 — structured drop list so the UI can render "which
-            # tooth lost the FDI dedup, and to whom" instead of just a count.
+            # Structured drop list so the UI can render "which tooth lost the
+            # FDI dedup, and to whom" instead of just a count.
             "dropped": dropped_detail,
             "tooth_contributions": tooth_contributions,
             "ensemble": ensemble,
             "ensemble_members": [m[0] for m in models.ensemble_models] if ensemble else None,
-            # Phase 9.2 — calibrated open-set + provenance (consumed by Phase 9.3 UI).
+            # Calibrated open-set + provenance (consumed by the results UI).
             "open_set_score": open_set_score,
             "open_set_decision": open_set_decision,
             "open_set_threshold": (
@@ -1727,9 +1723,9 @@ async def run_pipeline(
             "expected_match": _expected_match_info(
                 expected_pid, results_list, query_vec, models.registry_index,
             ),
-            # Phase 9.4 — Phase 8.10 age estimate (sex head intentionally not wired).
+            # Age estimate (sex head intentionally not wired).
             "age_estimate": age_estimate,
-            # Phase 9.5 — query_id so the frontend can hit /api/search-fragment.
+            # query_id so the frontend can hit /api/search-fragment.
             "query_id": query_id,
         },
     }
@@ -1744,7 +1740,7 @@ async def run_crops_pipeline(
     fdi_overrides: list[str | None] | None = None,
     session_id: str | None = None,
 ) -> AsyncGenerator[dict, None]:
-    """Phase 9.6 — streaming identify-from-crops.
+    """Streaming identify-from-crops.
 
     Same SSE event shape as ``run_pipeline`` for stages ``validate``,
     ``embed`` (no per-tooth bbox info since we have no panoramic), and
@@ -1857,7 +1853,7 @@ async def run_crops_pipeline(
     sims, neighbor_ids = models.registry_index.search(query_vec, k=cfg.top_k)
     timings["search"] = (time.perf_counter() - t0) * 1000
 
-    # --- Session merge (Phase 9.7) ---
+    # --- Session merge ---
     session_results: list[dict] = []
     if session_id is not None:
         try:
@@ -1942,8 +1938,8 @@ async def run_crops_pipeline(
             tooth_contributions.append({
                 "fdi": fdi,
                 "fdi_confidence": fdi_conf_kept[i],
-                # Phase 9.9 — crops path has no YOLO (uploads bypass detection);
-                # null surfaces as em-dash in the per-tooth table.
+                # Crops path has no YOLO (uploads bypass detection); null
+                # surfaces as em-dash in the per-tooth table.
                 "yolo_confidence": None,
                 "similarity_to_top1": float(per_tooth_sims[i]),
             })
@@ -1963,11 +1959,11 @@ async def run_crops_pipeline(
             "timings_ms": {k: round(v, 1) for k, v in timings.items()},
             "n_query_teeth": int(len(embeddings_arr)),
             "n_dropped": sum(1 for r in per_crop_records if r["dropped_as_duplicate"]),
-            # Phase 9.9 — synthesise the same shape used by the panoramic path.
-            # YOLO conf is absent for uploads (crops bypass detection).
-            # kept_fdi_confidence is the auto-confidence of the kept (winner)
-            # crop sharing this FDI; the UI uses it to render the dedup
-            # comparison ("dropped at X% — kept at Y%").
+            # Synthesise the same shape used by the panoramic path. YOLO conf is
+            # absent for uploads (crops bypass detection). kept_fdi_confidence
+            # is the auto-confidence of the kept (winner) crop sharing this
+            # FDI; the UI uses it to render the dedup comparison ("dropped at
+            # X% — kept at Y%").
             "dropped": [
                 {
                     "fdi": r["chosen_fdi"],
@@ -2000,13 +1996,13 @@ async def run_crops_pipeline(
             "expected_person_id": expected_pid,
             "age_estimate": age_estimate,
             "query_id": query_id,
-            # Phase 9.6 marker — UI flips the results-header copy on this.
+            # UI flips the results-header copy on this.
             "crops_mode": True,
-            # Phase 9.6.1 — per-crop outcomes echoed on the search-stage
-            # payload so the results view can surface auto-FDI labels, OOD
-            # rejections, and duplicate drops back to the uploaded thumbnails
-            # (the validate-stage emission lands during a stage transition
-            # the results card doesn't observe).
+            # Per-crop outcomes echoed on the search-stage payload so the
+            # results view can surface auto-FDI labels, OOD rejections, and
+            # duplicate drops back to the uploaded thumbnails (the validate-
+            # stage emission lands during a stage transition the results card
+            # doesn't observe).
             "per_crop": per_crop_records,
         },
     }
