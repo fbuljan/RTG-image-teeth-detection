@@ -87,6 +87,11 @@ export default function Page() {
         status: "Uploading…",
         currentImageUrl: uploadedPreview,
         mode,
+        // Explicit false — INITIAL_PIPELINE doesn't carry the key, so a spread
+        // alone preserves a stale `true` from a prior crops run. Set it here
+        // so the panoramic path always renders the FDI row + correct stage
+        // labels even when the prior query was a crops query.
+        cropsMode: false,
       });
 
       // Scroll the pipeline panel into view so the user actually sees the
@@ -240,17 +245,9 @@ export default function Page() {
           </div>
         </div>
         <p className="max-w-3xl text-sm text-slate-600 dark:text-slate-300">
-          Pick a person from the registry, download their panoramic X-ray as
-          <code className="mx-1 rounded bg-slate-100 px-1 py-0.5 text-xs dark:bg-slate-800">
-            xray.png
-          </code>
-          , then drop it back into the upload zone. The system will detect
-          teeth, number them, embed each one, and search a registry of 1,178
-          enrolled persons for the closest match.{" "}
-          <span className="text-slate-500 dark:text-slate-400">
-            (Example panoramics are themselves enrolled — re-uploading one is a self-match. Use
-            the fragment-size chips on the results, or upload a novel X-ray, to see real retrieval.)
-          </span>
+          Pick a person, download their panoramic, drop it back into the upload
+          zone. The system detects teeth, numbers them, embeds each one, and
+          searches a 1,178-person registry for the closest match.
         </p>
       </header>
 
@@ -325,6 +322,7 @@ export default function Page() {
       {results && (
         <div ref={resultsRef} className="scroll-mt-4">
           <ResultsCards
+            sessionId={sessionId}
             state={{
               ...results,
               selectedPersonId: selected?.person_id,
@@ -345,7 +343,11 @@ export default function Page() {
                       openSetScore: r.open_set_score ?? null,
                       openSetDecision: r.open_set_decision ?? "unknown",
                       openSetThreshold: r.open_set_threshold ?? null,
-                      simTop1Percentile: r.sim_top1_percentile ?? null,
+                      // Fragment search recomputes full-registry rank for the
+                      // expected person against the smaller subset's pooled
+                      // vector — replace, don't preserve, so the chip always
+                      // matches the rendered top-K.
+                      expectedMatch: r.expected_match ?? null,
                       ageEstimate: r.age_estimate ?? prev.ageEstimate,
                       // Phase 9.5.1 — fragment search recomputes contributions
                       // against the *new* top-1. Use them when present; if the
@@ -473,7 +475,7 @@ function applyEvent(
           openSetThreshold: evt.data.open_set_threshold ?? null,
           queryProvenance: evt.data.query_provenance ?? "unknown",
           expectedPersonId: evt.data.expected_person_id ?? null,
-          simTop1Percentile: evt.data.sim_top1_percentile ?? null,
+          expectedMatch: evt.data.expected_match ?? null,
           ageEstimate: evt.data.age_estimate ?? null,
           // Phase 9.5 — fragment-search support.
           queryId: evt.data.query_id ?? null,
@@ -481,6 +483,9 @@ function applyEvent(
           // Phase 9.6 — backend sets crops_mode=true on the search event for
           // /api/identify-crops; the results header flips its copy.
           cropsMode: evt.data.crops_mode ?? false,
+          // Phase 9.6.1 — per-input-crop outcomes (auto-FDI label, OOD,
+          // dup). Only populated on the crops path; absent otherwise.
+          perCrop: evt.data.per_crop,
         });
         setPipeline((prev) => ({ ...prev, status: "Done." }));
       }

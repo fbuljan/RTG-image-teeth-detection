@@ -239,6 +239,70 @@ def _build_model_card() -> dict:
     card["per_category"] = _load_csv(category_csv)
     card["subgroups"] = _load_csv(subgroup_csv)
 
+    # Phase 8.9 person-level cohort retrieval (full panoramic queries against
+    # the 1,178-person deployed registry). This is the apples-to-apples Phase
+    # 8.9 surface the thesis cites; the per-tooth-crop SubgroupBlock above is
+    # a different protocol (per-tooth crop search). Both shipped together so
+    # the UI can disambiguate them.
+    cohort_path = PROJECT_ROOT / "identification/runs/phase8_permanent/subset_eval.json"
+    if cohort_path.exists():
+        with open(cohort_path) as f:
+            cohort = json.load(f)
+        card["person_cohorts"] = {
+            "full_test": cohort.get("full_test"),
+            "all_permanent": cohort.get("all_permanent"),
+            "any_deciduous": cohort.get("any_deciduous"),
+            "age_buckets": cohort.get("age_buckets", []),
+            "per_sex": cohort.get("per_sex", []),
+            "honesty_rule_verdict": cohort.get("honesty_rule_verdict"),
+        }
+
+    # Phase 8 rotation-stress headline numbers (±30° per-person rotation, full
+    # registry, deployed pipeline). One condensed row for the demo; the full
+    # paired-bootstrap analysis stays in the eval artefact.
+    rotation_path = PROJECT_ROOT / "identification/runs/phase8_deployed_yolo_reg/rotation_stress.json"
+    if rotation_path.exists():
+        with open(rotation_path) as f:
+            rot = json.load(f)
+        rot_rows = [
+            r for r in rot.get("sweep_full_registry_rotated", [])
+            if r.get("n_query") in (1, 4, 8, 16)
+        ]
+        rot_rows.sort(key=lambda r: r["n_query"])
+        card["rotation_stress"] = {
+            "rotation_deg_max": rot.get("rotation_deg_max"),
+            "n_persons": rot.get("n_persons_usable"),
+            "sweep": [
+                {
+                    "n_query": r["n_query"],
+                    "rank1_mean": r.get("rank1_mean"),
+                    "rank1_ci95_low": r.get("rank1_ci95_low"),
+                    "rank1_ci95_high": r.get("rank1_ci95_high"),
+                }
+                for r in rot_rows
+            ],
+        }
+
+    # Phase 8.6 open-set headline numbers — sourced from the canonical
+    # results.json (test-set clean + rotated bootstrap AUROCs and the locked
+    # decision threshold). The frontend uses these in the open-set block;
+    # reading from JSON here means hardcoded strings cannot drift.
+    open_set_results_path = PROJECT_ROOT / "identification/runs/phase8_open_set/results.json"
+    open_set_cal_path = PROJECT_ROOT / "identification/runs/phase8_open_set/phase8_open_set_calibration.json"
+    if open_set_results_path.exists() and open_set_cal_path.exists():
+        with open(open_set_results_path) as f:
+            res = json.load(f)
+        with open(open_set_cal_path) as f:
+            cal = json.load(f)
+        op = cal.get("operating_point", {}) or {}
+        card["open_set"] = {
+            "auroc_clean": res.get("test_clean", {}).get("auroc"),
+            "auroc_rotated": res.get("test_rotated", {}).get("auroc"),
+            "threshold_z": op.get("threshold"),
+            "target_tpr_oos": op.get("target_tpr_oos"),
+            "frr_in_registry": op.get("frr_in_registry"),
+        }
+
     if config_yaml.exists():
         with open(config_yaml) as f:
             full_cfg = yaml.safe_load(f) or {}
@@ -407,22 +471,38 @@ class FragmentSearchRequest(BaseModel):
 
 _QUERY_ID_RE = re.compile(r"^[a-f0-9]{1,32}$")
 
+# Header name needed both here and by the session-aware endpoints further
+# down — declared early so the search-fragment default-arg can reference it.
+SESSION_ID_HEADER = "X-Session-Id"
+
 
 @app.post("/api/search-fragment")
-def search_fragment(req: FragmentSearchRequest) -> dict:
-    """Re-search the registry using a subset of the previous query's teeth."""
+def search_fragment(
+    req: FragmentSearchRequest,
+    session_id: str | None = Header(None, alias=SESSION_ID_HEADER),
+) -> dict:
+    """Re-search the registry using a subset of the previous query's teeth.
+
+    When `X-Session-Id` is supplied, the caller's session enrolments are merged
+    into the candidate pool — same contract as `/api/identify`. Without it the
+    fragment search would silently drop session candidates that the parent
+    /identify just placed at rank #1, which is the bug fixed here.
+    """
     # Phase 9.5.1 — guard against path traversal. The /identify endpoint mints
     # query_id from uuid.uuid4().hex[:12] so it's always lowercase hex; mirror
     # the /api/intermediate validation rather than passing arbitrary strings
     # straight into a filesystem join.
     if not _QUERY_ID_RE.fullmatch(req.query_id):
         raise HTTPException(status_code=400, detail="Invalid query_id")
+    if session_id is not None and not session_store.is_valid_session_id(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session id")
     try:
         return run_fragment_search(
             query_id=req.query_id,
             tooth_indices=req.tooth_indices,
             models=models,
             config=config,
+            session_id=session_id,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -545,7 +625,8 @@ async def identify_crops(
 # as a UX hint (yellow banner), never as a verdict.
 
 DUPLICATE_Z_THRESHOLD = 0.7
-SESSION_ID_HEADER = "X-Session-Id"
+# SESSION_ID_HEADER declared earlier (before /api/search-fragment, which also
+# uses it). Don't redeclare here.
 ENROLMENT_NAME_MAX_LEN = 40
 # Panoramic uploads are normally 1-5 MB. Cap at 25 MB to defang an OOM
 # attack — a malicious client could otherwise POST gigabyte-sized PNGs and

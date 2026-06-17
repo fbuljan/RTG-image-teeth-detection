@@ -28,13 +28,53 @@ type SweepEntry = {
   n_persons: number;
   n_trials: number;
   rank1_mean: number;
-  rank1_std: number;
+  rank1_std: number | null;
+  rank1_ci95_low?: number | null;
+  rank1_ci95_high?: number | null;
   rank5_mean: number;
-  rank5_std: number;
+  rank5_std: number | null;
   rank10_mean: number;
-  rank10_std: number;
-  mAP_mean: number;
-  mAP_std: number;
+  rank10_std: number | null;
+  mAP_mean: number | null;
+  mAP_std: number | null;
+};
+
+type CohortEntry = {
+  label: string;
+  n: number;
+  r1_mean: number;
+  r1_ci_low: number;
+  r1_ci_high: number;
+};
+
+type PersonCohorts = {
+  full_test?: CohortEntry;
+  all_permanent?: CohortEntry;
+  any_deciduous?: CohortEntry;
+  age_buckets?: CohortEntry[];
+  per_sex?: CohortEntry[];
+  honesty_rule_verdict?: string;
+};
+
+type RotationSweepRow = {
+  n_query: number;
+  rank1_mean: number;
+  rank1_ci95_low: number | null;
+  rank1_ci95_high: number | null;
+};
+
+type RotationStress = {
+  rotation_deg_max?: number;
+  n_persons?: number;
+  sweep: RotationSweepRow[];
+};
+
+type OpenSetHeadline = {
+  auroc_clean?: { point: number; ci95_low: number; ci95_high: number };
+  auroc_rotated?: { point: number; ci95_low: number; ci95_high: number };
+  threshold_z?: number;
+  target_tpr_oos?: number;
+  frr_in_registry?: number;
 };
 
 type CategoryRow = {
@@ -119,6 +159,9 @@ type ModelCardPayload = {
   yolo?: YoloSummary;
   ensemble?: EnsembleSummary;
   ensemble_yolo?: EnsembleSummary;
+  person_cohorts?: PersonCohorts;
+  rotation_stress?: RotationStress;
+  open_set?: OpenSetHeadline;
 };
 
 const PRETTY_SUBGROUP: Record<string, string> = {
@@ -217,6 +260,15 @@ function ModelCardBody({ data }: { data: ModelCardPayload }) {
       {data.eval_test && <SingleToothBlock metrics={data.eval_test} />}
       {data.multi_tooth_sweep && data.multi_tooth_sweep.length > 0 && (
         <MultiToothBlock sweep={data.multi_tooth_sweep} />
+      )}
+      {data.rotation_stress && data.rotation_stress.sweep.length > 0 && (
+        <RotationStressBlock rotation={data.rotation_stress} />
+      )}
+      {data.open_set && (data.open_set.auroc_clean || data.open_set.auroc_rotated) && (
+        <OpenSetBlock openSet={data.open_set} />
+      )}
+      {data.person_cohorts && (
+        <PersonCohortsBlock cohorts={data.person_cohorts} />
       )}
       {data.ensemble && data.ensemble.multi_tooth_sweep && data.ensemble.multi_tooth_sweep.length > 0 && (
         <EnsembleBlock
@@ -408,20 +460,20 @@ function MultiToothBlock({ sweep }: { sweep: SweepEntry[] }) {
     <div>
       <SectionTitle
         title="Multi-tooth retrieval — deployed pipeline"
-        hint="For each n_query, hold out N teeth as query, aggregate the rest into a gallery profile, mean-pool both sides. Averaged over multiple trials per query size, with 95% bootstrap confidence intervals. This is the deployed FDI-init single-model embedder on YOLO-cropped teeth against the 1,178-person YOLO-built registry — the same pipeline the live demo runs. Headline R1 = 82.6% [79.8, 86.0] at n_query=16. mAP is not computed for this sweep protocol."
+        hint="Deployed embedder on YOLO crops, searched against the 1,178-person registry. Per row: hold out N teeth, mean-pool both sides, average over trials with 95% bootstrap CIs. Headline R1 = 82.6% at N=16."
       />
       <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
         With multi-tooth aggregation, Rank-1 climbs from ~3% (one tooth) to
-        <strong> 82.6%</strong> (16 teeth) and Rank-5 to over 97%. This is
-        the deployed pipeline: FDI-init embedder on YOLO crops, searched
-        against the YOLO-built 1,178-person registry.
+        <strong> 82.6%</strong> (16 teeth) and Rank-5 to over 97%. Same pipeline
+        the live demo runs.
       </p>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
             <tr>
-              <th className="py-1 text-left">n_query</th>
+              <th className="py-1 text-left">N teeth</th>
               <th className="py-1 text-right">Rank-1</th>
+              <th className="py-1 text-right text-[10px] normal-case">95% CI</th>
               <th className="py-1 text-right">Rank-5</th>
               <th className="py-1 text-right">Rank-10</th>
               <th className="py-1 text-right">mAP</th>
@@ -432,6 +484,9 @@ function MultiToothBlock({ sweep }: { sweep: SweepEntry[] }) {
             {sweep.map((row) => {
               const widthPct = Math.max(2, Math.round((row.rank1_mean / Math.max(maxR1, 0.01)) * 100));
               const isPeak = row.rank1_mean === maxR1;
+              const hasCI =
+                row.rank1_ci95_low !== null && row.rank1_ci95_low !== undefined
+                && row.rank1_ci95_high !== null && row.rank1_ci95_high !== undefined;
               return (
                 <tr
                   key={row.n_query}
@@ -442,6 +497,11 @@ function MultiToothBlock({ sweep }: { sweep: SweepEntry[] }) {
                   <td className="py-1 font-mono">{row.n_query}</td>
                   <td className="py-1 text-right font-mono tabular-nums">
                     {fmtPct(row.rank1_mean, 1)}
+                  </td>
+                  <td className="py-1 text-right font-mono text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
+                    {hasCI
+                      ? `[${(row.rank1_ci95_low! * 100).toFixed(1)}, ${(row.rank1_ci95_high! * 100).toFixed(1)}]`
+                      : "—"}
                   </td>
                   <td className="py-1 text-right font-mono tabular-nums">
                     {fmtPct(row.rank5_mean, 1)}
@@ -467,9 +527,189 @@ function MultiToothBlock({ sweep }: { sweep: SweepEntry[] }) {
         </table>
       </div>
       <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-        Peak is highlighted. Beyond n_query=16 the eligible gallery shrinks (only
+        Peak is highlighted. Beyond N=16 the eligible gallery shrinks (only
         people with many teeth remain), so larger values aren&apos;t directly
         comparable.
+      </p>
+    </div>
+  );
+}
+
+function RotationStressBlock({ rotation }: { rotation: RotationStress }) {
+  const deg = rotation.rotation_deg_max ?? 30;
+  return (
+    <div>
+      <SectionTitle
+        title={`Rotation stress (±${deg}°)`}
+        hint="Same multi-tooth protocol, but the query panoramic is rotated ±30° before YOLO detection. Rotation is not handled by augmentation in training, so this is a stress test of geometric distribution shift."
+      />
+      <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
+        Rank-1 drops sharply under rotation. The system is not rotation-invariant;
+        in deployment, upright panoramics should be assumed.
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            <tr>
+              <th className="py-1 text-left">N teeth</th>
+              <th className="py-1 text-right">R1 rotated</th>
+              <th className="py-1 text-right text-[10px] normal-case">95% CI</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rotation.sweep.map((row) => {
+              const hasCI = row.rank1_ci95_low !== null && row.rank1_ci95_high !== null;
+              return (
+                <tr key={row.n_query} className="border-t border-slate-100 dark:border-slate-800">
+                  <td className="py-1 font-mono">{row.n_query}</td>
+                  <td className="py-1 text-right font-mono tabular-nums">{fmtPct(row.rank1_mean, 1)}</td>
+                  <td className="py-1 text-right font-mono text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
+                    {hasCI
+                      ? `[${(row.rank1_ci95_low! * 100).toFixed(1)}, ${(row.rank1_ci95_high! * 100).toFixed(1)}]`
+                      : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function OpenSetBlock({ openSet }: { openSet: OpenSetHeadline }) {
+  const clean = openSet.auroc_clean;
+  const rotated = openSet.auroc_rotated;
+  return (
+    <div>
+      <SectionTitle
+        title="Open-set rejection — Phase 8.6"
+        hint="Calibrated AUROC for the in-registry / out-of-set decision. The threshold is locked from validation; the live demo applies it to every query but does not show the verdict prominently."
+      />
+      <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
+        Calibrated on held-out enrolment data with the locked z-scored top-1
+        threshold. Clean AUROC = {clean ? clean.point.toFixed(3) : "—"}; rotated
+        AUROC = {rotated ? rotated.point.toFixed(3) : "—"}. The decision the
+        live demo shows in <em>Technical details</em> uses this calibration.
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            <tr>
+              <th className="py-1 text-left">Test condition</th>
+              <th className="py-1 text-right">AUROC</th>
+              <th className="py-1 text-right text-[10px] normal-case">95% CI</th>
+            </tr>
+          </thead>
+          <tbody>
+            {clean && (
+              <tr className="border-t border-slate-100 dark:border-slate-800">
+                <td className="py-1">Clean</td>
+                <td className="py-1 text-right font-mono tabular-nums">{clean.point.toFixed(3)}</td>
+                <td className="py-1 text-right font-mono text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
+                  [{clean.ci95_low.toFixed(3)}, {clean.ci95_high.toFixed(3)}]
+                </td>
+              </tr>
+            )}
+            {rotated && (
+              <tr className="border-t border-slate-100 dark:border-slate-800">
+                <td className="py-1">Rotated</td>
+                <td className="py-1 text-right font-mono tabular-nums">{rotated.point.toFixed(3)}</td>
+                <td className="py-1 text-right font-mono text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
+                  [{rotated.ci95_low.toFixed(3)}, {rotated.ci95_high.toFixed(3)}]
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      {(openSet.threshold_z !== undefined || openSet.frr_in_registry !== undefined) && (
+        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+          {openSet.threshold_z !== undefined && (
+            <>Locked threshold z = <span className="font-mono">{openSet.threshold_z.toFixed(3)}</span>. </>
+          )}
+          {openSet.target_tpr_oos !== undefined && (
+            <>Target OOS true-rejection {fmtPct(openSet.target_tpr_oos, 0)}. </>
+          )}
+          {openSet.frr_in_registry !== undefined && (
+            <>Trade-off: in-registry false-rejection {fmtPct(openSet.frr_in_registry, 1)}.</>
+          )}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function PersonCohortsBlock({ cohorts }: { cohorts: PersonCohorts }) {
+  const rows: Array<{ label: string; cohort?: CohortEntry; emphasis?: "highlight" | "warn" }> = [
+    { label: "Full test", cohort: cohorts.full_test },
+    { label: "All-permanent dentition", cohort: cohorts.all_permanent, emphasis: "highlight" },
+    { label: "Any deciduous tooth", cohort: cohorts.any_deciduous },
+  ];
+  const ageRows = (cohorts.age_buckets ?? []).map((c) => ({
+    label: `Age ${c.label}y`,
+    cohort: c,
+    emphasis: (c.label === "6-9" ? "warn" : undefined) as "warn" | undefined,
+  }));
+  const sexRows = (cohorts.per_sex ?? []).map((c) => ({
+    label: c.label === "male" ? "Male" : c.label === "female" ? "Female" : c.label,
+    cohort: c,
+    emphasis: undefined as "highlight" | "warn" | undefined,
+  }));
+
+  return (
+    <div>
+      <SectionTitle
+        title="Person-level cohort retrieval — Phase 8.9"
+        hint="Full-panoramic queries against the 1,178-person deployed registry, stratified by dentition stage, age, and sex. Different protocol from the per-tooth-crop subgroup table below."
+      />
+      <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
+        Person-level R1 splits sharply by dentition stage. The all-permanent
+        subset is the dataset&apos;s adult-proxy ceiling (91.4%); the 6-9y
+        mixed-dentition cohort is the floor (68.8%). Person-level sex shows no
+        gap.
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            <tr>
+              <th className="py-1 text-left">Cohort</th>
+              <th className="py-1 text-right">n</th>
+              <th className="py-1 text-right">R1</th>
+              <th className="py-1 text-right text-[10px] normal-case">95% CI</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...rows, ...ageRows, ...sexRows].map(({ label, cohort, emphasis }, idx) => {
+              if (!cohort) return null;
+              return (
+                <tr
+                  key={`${label}-${idx}`}
+                  className={`border-t border-slate-100 dark:border-slate-800 ${
+                    emphasis === "highlight"
+                      ? "bg-emerald-50 dark:bg-emerald-900/20"
+                      : emphasis === "warn"
+                        ? "bg-amber-50 dark:bg-amber-900/20"
+                        : ""
+                  }`}
+                >
+                  <td className="py-1">{label}</td>
+                  <td className="py-1 text-right font-mono tabular-nums">{cohort.n}</td>
+                  <td className="py-1 text-right font-mono tabular-nums">{fmtPct(cohort.r1_mean, 1)}</td>
+                  <td className="py-1 text-right font-mono text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
+                    [{(cohort.r1_ci_low * 100).toFixed(1)}, {(cohort.r1_ci_high * 100).toFixed(1)}]
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+        The all-permanent cohort is an upper bound on adult deployment, not a
+        deployment-ready number — training contained no patients older than 18,
+        no restorations, prostheses, or edentulous regions.
       </p>
     </div>
   );
@@ -664,9 +904,15 @@ function SubgroupBlock({ rows }: { rows: SubgroupRow[] }) {
   return (
     <div>
       <SectionTitle
-        title="Demographic and clinical subgroups"
-        hint="Single-tooth Rank-1 / AUC stratified by demographic and clinical attributes. Larger gaps mean the model performs unevenly across that dimension."
+        title="Per-tooth-crop subgroup breakdown"
+        hint="Single-tooth crop retrieval (one tooth → registry), stratified. Different protocol from person-level R1 above: this is per-crop, not per-person. Use the Person-level cohort table for the deployed multi-tooth retrieval signal."
       />
+      <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
+        These rows are per-tooth-crop retrieval (one tooth against the registry,
+        n=5,898 crops). The person-level R1 = 82.6% headline uses a different
+        protocol (multi-tooth aggregation per person, n=178). Per-tooth and
+        per-person numbers are not directly comparable.
+      </p>
       <div className="space-y-4">
         {Array.from(grouped.entries()).map(([type, list]) => (
           <div key={type}>
@@ -765,9 +1011,23 @@ function Caveats({ registrySize }: { registrySize: number }) {
           <em> relative gap </em>between candidates, not the absolute value.
         </li>
         <li>
-          Multi-tooth aggregation peaks at n_query = 16. Larger query sizes
-          shrink the eligible gallery to high-tooth-count subjects and
-          aren&apos;t directly comparable.
+          Multi-tooth aggregation peaks at N=16. Larger query sizes shrink the
+          eligible gallery to high-tooth-count subjects and aren&apos;t directly
+          comparable.
+        </li>
+        <li>
+          Training set is pediatric / adolescent (6-18y). Adult dentition with
+          restorations, prostheses, or edentulous regions is untested; the
+          91.4% all-permanent-cohort R1 is an upper bound, not a deployment
+          figure.
+        </li>
+        <li>
+          One panoramic per person in the dataset — cross-visit re-identification
+          (different X-ray of the same person) was never measured.
+        </li>
+        <li>
+          The system is not rotation-invariant. Rank-1 drops from 82.6% upright
+          to 43.1% at ±30° rotation, and open-set AUROC from 0.832 to 0.609.
         </li>
       </ul>
     </div>

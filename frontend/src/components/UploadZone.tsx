@@ -13,7 +13,7 @@ type Props = {
 };
 
 const MODE_HINT =
-  "Detection runs a YOLO bounding-box detector (~99% box mAP50). Segmentation runs a YOLO instance segmenter (~95% mask mAP50) and uses the tight bbox of each predicted mask as the crop — closer to the GT-mask crops the embedder was trained on.";
+  "How teeth are cut out before identification. Segmentation traces each tooth's outline; detection uses a bounding box. Segmentation crops are closer to what the embedder was trained on.";
 
 export function UploadZone({
   onIdentify,

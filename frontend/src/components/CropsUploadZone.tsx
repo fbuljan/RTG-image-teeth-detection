@@ -4,17 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { InfoHint } from "@/components/InfoHint";
 
-// Phase 9.6 — pre-cropped tooth upload tab.
-//
-// Multi-file picker (PNG/JPG, 1-32). Each file becomes a card with a
-// 96px preview, filename, FDI override input (placeholder "Auto"), and
-// remove button. The "Identify from crops" button passes the file list
-// (plus the parallel array of FDI overrides) up to the parent.
-//
-// Validation is server-side — the OOD gate runs in
-// /api/identify-crops::validate. The UI does not preemptively reject
-// images; it lets the backend's max-softmax heuristic do the talking,
-// because the user might legitimately want to try unusual crops.
+// Pre-cropped tooth upload tab — multi-file picker with per-crop FDI override.
 
 const FDI_PATTERN = /^[1-8][1-8]$/; // basic FDI: 11..48, 51..85 etc. (loose)
 const MAX_CROPS = 32;
@@ -120,13 +110,13 @@ export function CropsUploadZone({
           <h2 className="text-lg font-semibold">Upload tooth crops</h2>
           <InfoHint
             text={
-              "Pre-cropped single-tooth X-ray images, 1-32 files. Each crop runs through the FDI classifier + embedder; mean-pooled embeddings are searched against the registry the same way a full panoramic would be. Override the FDI label per crop if the auto-detection is wrong. Crops that fail an OOD heuristic (max-softmax < 0.25) are flagged at validate."
+              "1-32 pre-cropped single-tooth images. Each is classified, embedded, mean-pooled, and searched against the registry. Override the FDI label per crop if auto-detection misfires."
             }
           />
         </div>
         <p className="text-sm text-slate-500 dark:text-slate-400">
-          Forensic scenario: you have a handful of post-mortem tooth crops but no panoramic. Pre-registered priors:
-          {" "}N=4 → R1 ≈ 21%, N=8 → R1 ≈ 45%, N=16 → R1 ≈ 83%.
+          Drop in individual tooth crops when you don&apos;t have a full panoramic.
+          Expected R1: N=4 ≈ 21%, N=8 ≈ 45%, N=16 ≈ 83%.
         </p>
       </header>
 

@@ -212,3 +212,14 @@ frontend/out/
 
 # Claude local state
 .claude/
+
+# Local deployment plan (not part of the thesis demo source)
+DEPLOY.md
+
+# Playwright MCP transient artifacts
+.playwright-mcp/
+
+# Ad-hoc test fixtures created during demo iteration. Not load-bearing for
+# the codebase — keep them local so the repo doesn't grow with throwaway PNGs.
+test_panoramics_novel/
+test_crops_*/

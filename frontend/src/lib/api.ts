@@ -19,11 +19,6 @@ export type SearchResult = {
   fake_name: string;
   n_teeth: number | null;
   similarity: number;
-  // Phase 9.3 — empirical percentile of this similarity against the 740
-  // in-registry sim_top1 values from Phase 8.6 held-out enrolment.
-  // Phase 9.7 — null when this result is a session enrolment OR not the
-  // canonical top-1; calibration is canonical-only.
-  similarity_percentile?: number | null;
   // Phase 9.7 — true when this result came from the caller's session
   // enrolments rather than the canonical 1,178-person registry.
   is_session?: boolean;
@@ -32,12 +27,18 @@ export type SearchResult = {
 // Phase 9.2 — Phase 8.6 locked open-set decision.
 export type OpenSetDecision = "in_registry" | "rejected" | "unknown";
 
-// Phase 9.2 — provenance of the uploaded query.
-// "self_match"  — exact bytes of an enrolled panoramic (tautological match).
-// "novel"       — bytes do not match any enrolled image.
-// "heldout"     — reserved for Phase 9.8 curated OOS picks.
-// "unknown"     — could not classify (filesystem error etc.).
-export type QueryProvenance = "self_match" | "novel" | "heldout" | "unknown";
+// Provenance of the uploaded query.
+// "self_match"          — exact bytes of an enrolled canonical panoramic.
+// "session_self_match"  — bytes don't match canonical, but top-1 is a session
+//                         enrolment with similarity ≥ 0.95 (i.e. verify-by-
+//                         re-querying a session enrol).
+// "novel"               — bytes do not match any enrolled image.
+// "unknown"             — could not classify (filesystem error etc.).
+export type QueryProvenance =
+  | "self_match"
+  | "session_self_match"
+  | "novel"
+  | "unknown";
 
 // Phase 9.9 — embed-stage progress events now carry the FDI labels +
 // confidences of teeth just embedded, so the UI can show "13, 12, 11…" live
@@ -70,6 +71,17 @@ export type ToothContribution = {
   // queries written before the cache schema was widened; UI renders em-dash.
   yolo_confidence?: number | null;
   similarity_to_top1: number;
+};
+
+// Full-registry rank + similarity of the expected person, when known
+// (registry self-match or session self-match). Backend computes this with
+// a single FAISS-FLAT search over all 1,178 vectors. Used by ResultsCards
+// to tell the user "expected at #42 (sim 0.881)" when the right person
+// gets pushed out of the visible top-K (e.g. by a small fragment subset).
+export type ExpectedMatch = {
+  rank: number;
+  similarity: number;
+  person_id: string;
 };
 
 // Phase 9.9 — structured drop record (one entry per tooth lost to FDI dedup).
@@ -107,7 +119,7 @@ export type StageCompleteData = {
   open_set_threshold?: number | null;
   query_provenance?: QueryProvenance;
   expected_person_id?: string | null;
-  sim_top1_percentile?: number | null;
+  expected_match?: ExpectedMatch | null;
   // Phase 9.4 — Phase 8.10 age estimate (sex head NOT wired; failed Pass).
   age_estimate?: AgeEstimate | null;
   // Phase 9.5 — emitted on `embed` and `search` stage_complete events. Used
@@ -176,10 +188,17 @@ export type FragmentSearchResponse = StageCompleteData & {
 export async function searchFragment(
   queryId: string,
   toothIndices: number[],
+  sessionId?: string,
 ): Promise<FragmentSearchResponse> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  // Without the session id, the backend silently drops session enrolments
+  // from the merged candidate pool — and the auto-fired N=16 fragment would
+  // then overwrite the parent identify's session-aware top-K with a
+  // canonical-only ranking. Always pass the session id when we have one.
+  if (sessionId) headers["X-Session-Id"] = sessionId;
   const res = await fetch(`${API_BASE}/api/search-fragment`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({ query_id: queryId, tooth_indices: toothIndices }),
   });
   if (!res.ok) {

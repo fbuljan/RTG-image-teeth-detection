@@ -4,17 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { postEnrol, type EnrolResponse } from "@/lib/api";
 
-// Phase 9.7 — Session enrolment flow.
-//
-// Three-step modal: (1) pick file + name, (2) POST /api/enrol and surface
-// the result (enrolled / duplicate-likely banner), (3) confirmation with a
-// "verify by re-querying" button that closes the modal and re-uploads the
-// same file through /api/identify (the parent owns the verify step).
-//
-// Calibration honesty: the spec explicitly says session enrolments do NOT
-// inherit Phase 8.6 calibrated trust. The "verify by re-querying" CTA only
-// promises that the FAISS index round-trips correctly (sim ≈ 1.0); it does
-// not imply a calibrated identification of the enrolled person.
+// Session enrolment modal — pick file + name, POST /api/enrol, optional
+// re-query to verify the registry round-trip.
 
 type Step = "pick" | "submitting" | "confirm";
 
@@ -138,8 +129,7 @@ export function EnrolModal({
                 className="w-full rounded-md border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800"
               />
               <p className="mt-1 text-xs text-slate-500">
-                Shown next to this person in your top-K results. Max {NAME_MAX} characters. No age,
-                sex, or clinical metadata is requested or stored.
+                Shown next to this person in your results. Max {NAME_MAX} characters.
               </p>
             </div>
 
@@ -166,15 +156,11 @@ export function EnrolModal({
               <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900 dark:border-amber-800/60 dark:bg-amber-950/40 dark:text-amber-200">
                 <p className="font-semibold">Possible duplicate</p>
                 <p className="mt-1">
-                  This panoramic looks like{" "}
-                  <strong>{duplicate.matched_fake_name}</strong>{" "}
-                  {duplicate.matched_source === "session" ? (
-                    <em>(already enrolled in your session)</em>
-                  ) : (
-                    <em>(matches a person in the canonical registry)</em>
-                  )}{" "}
-                  — z-score {duplicate.open_set_score.toFixed(2)} ≫ {duplicate.duplicate_z_threshold} threshold,
-                  similarity {duplicate.matched_similarity.toFixed(4)}.
+                  Looks like <strong>{duplicate.matched_fake_name}</strong>{" "}
+                  {duplicate.matched_source === "session"
+                    ? "(already in your session)"
+                    : "(already in the registry)"}
+                  {" "}— similarity {duplicate.matched_similarity.toFixed(3)}.
                 </p>
                 <div className="mt-2 flex gap-2">
                   <button
@@ -224,16 +210,8 @@ export function EnrolModal({
         {step === "confirm" && enrolled && (
           <div className="space-y-4 px-6 py-5 text-sm">
             <p>
-              <strong>{enrolled.person.fake_name}</strong> added to your
-              session registry (24h scope). Embedding ran on{" "}
-              <strong>{enrolled.person.n_teeth}</strong> teeth.
-            </p>
-            <p className="text-xs text-slate-500">
-              Canonical 1,178-person registry is unchanged. The
-              <em> verify by re-querying</em> button below re-uploads the same
-              file through the identify endpoint. A correct rank-1 self-match
-              demonstrates the retrieval round-trip works — it is NOT a calibrated
-              identification claim (the locked calibration is canonical-only).
+              <strong>{enrolled.person.fake_name}</strong> added (24h scope).
+              Embedded on <strong>{enrolled.person.n_teeth}</strong> teeth.
             </p>
             <div className="flex items-center justify-end gap-2 border-t border-slate-200 pt-4 dark:border-slate-800">
               <button

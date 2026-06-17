@@ -317,6 +317,45 @@ def _to_tensor(crop: Image.Image, size: int, device: str) -> torch.Tensor:
     return tensor
 
 
+def _expected_match_info(
+    expected_pid: str | None,
+    results_list: list[dict],
+    query_vec: np.ndarray,
+    registry_index,
+) -> dict | None:
+    """When the upload's expected person is known (registry self-match), return
+    where that person actually ranked in the full registry. Used to surface
+    "expected at rank #N (sim 0.881)" when the expected ID misses the top-K.
+
+    Returns None when the expected PID is unknown or absent from the index.
+    Otherwise: ``{"rank": int, "similarity": float, "person_id": str}``.
+
+    Cheap: FAISS FLAT search over 1,178 vectors is O(N) regardless of k, so
+    asking for full-registry rank costs the same as the top-K query."""
+    if expected_pid is None:
+        return None
+    for r in results_list:
+        if r.get("person_id") == expected_pid:
+            return {
+                "rank": int(r["rank"]),
+                "similarity": float(r["similarity"]),
+                "person_id": expected_pid,
+            }
+    try:
+        n_total = len(registry_index)
+        sims_full, ids_full = registry_index.search(query_vec, k=n_total)
+        for rank_idx, pid in enumerate(ids_full):
+            if pid == expected_pid:
+                return {
+                    "rank": rank_idx + 1,
+                    "similarity": float(sims_full[rank_idx]),
+                    "person_id": expected_pid,
+                }
+    except Exception:
+        return None
+    return None
+
+
 async def _dwell(elapsed_ms: float, min_ms: float) -> None:
     """If a stage ran faster than `min_ms`, sleep so the user can see the overlay."""
     if min_ms <= 0:
@@ -457,6 +496,7 @@ def _build_search_payload(
     panoramic_path: Path | None,
     sub_embs: np.ndarray | None = None,
     yolo_conf_used: list[float] | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """Phase 9.5 — shared search-stage payload builder for /api/identify and
     /api/search-fragment. Takes a pooled+L2-normalised query vector and returns
@@ -466,36 +506,69 @@ def _build_search_payload(
     pooled into `query_vec`. When supplied, per-tooth contributions are computed
     against the *new* top-1 — without it we leave contributions empty so the
     frontend cannot render the stale numbers from the parent /identify run.
+
+    `session_id` enables session-enrolment merge — mirror of `run_pipeline`'s
+    merge. Without it, fragment search would silently drop session candidates
+    the parent identify just placed at rank #1 (the bug fixed in this patch).
+    Calibrated quantities (open_set, top1_top2_gap, confidence) stay
+    canonical-only because the Phase 8.6 thresholds were learned on that
+    distribution.
     """
     sims, neighbor_ids = models.registry_index.search(query_vec, k=config.top_k)
-    results_list = []
-    for rank, (sim, person_id) in enumerate(zip(sims, neighbor_ids)):
+    canonical_results: list[dict] = []
+    for sim, person_id in zip(sims, neighbor_ids):
         meta = models.registry_meta.get(person_id, {})
-        results_list.append({
-            "rank": rank + 1,
+        canonical_results.append({
             "person_id": person_id,
             "fake_name": meta.get("fake_name", person_id),
             "n_teeth": meta.get("n_teeth"),
             "similarity": float(sim),
+            "is_session": False,
         })
 
+    session_results: list[dict] = []
+    if session_id is not None:
+        try:
+            import importlib
+            sessions_module = importlib.import_module("backend.sessions")
+            session_index = sessions_module.load_session_index(
+                config.sessions_dir, session_id, dim=query_vec.shape[0]
+            )
+            if session_index is not None and len(session_index) > 0:
+                session_meta = sessions_module.load_session_meta(
+                    config.sessions_dir, session_id
+                ) or {}
+                meta_by_pid = {p["person_id"]: p for p in session_meta.get("persons", [])}
+                k_session = min(config.top_k, len(session_index))
+                ssims, sids = session_index.search(query_vec, k=k_session)
+                for sim, sid in zip(ssims, sids):
+                    m = meta_by_pid.get(sid, {})
+                    session_results.append({
+                        "person_id": sid,
+                        "fake_name": m.get("fake_name", sid),
+                        "n_teeth": int(m.get("n_teeth", 0)) or None,
+                        "similarity": float(sim),
+                        "is_session": True,
+                    })
+        except Exception as exc:  # noqa: BLE001
+            print(f"[pipeline] fragment session merge failed (session_id={session_id}): {exc}")
+
+    merged = sorted(
+        canonical_results + session_results,
+        key=lambda r: r["similarity"],
+        reverse=True,
+    )[: config.top_k]
+    results_list: list[dict] = []
+    for rank, r in enumerate(merged):
+        results_list.append({"rank": rank + 1, **r})
+
+    # Calibrated quantities use the CANONICAL top-1/top-2, not the merged
+    # ranking — same contract as `run_pipeline`.
     top1 = float(sims[0])
     top2 = float(sims[1]) if len(sims) > 1 else 0.0
     top1_top2_gap = top1 - top2 if len(sims) > 1 else 1.0
 
     open_set_score, open_set_decision = _open_set_score(top1, models.open_set_calibration)
-    sim_top1_pct = _sim_top1_percentile(top1, models.sim_top1_in_registry_sorted)
-    # Percentile is only well-defined for rank-1 — the reference distribution is
-    # held-out *correct identifications* (rank-1 hits). Applying it to ranks
-    # 2-5 silently relabels runners-up as "correct identifications observed at
-    # similarity X," which the audit flagged as a category error. Emit null for
-    # the non-top-1 ranks so the UI renders an em-dash, not a misleading number.
-    for r in results_list:
-        r["similarity_percentile"] = (
-            _sim_top1_percentile(r["similarity"], models.sim_top1_in_registry_sorted)
-            if r["rank"] == 1
-            else None
-        )
 
     # Provenance only makes sense when we have a panoramic_path (full /identify run).
     if panoramic_path is not None:
@@ -544,6 +617,10 @@ def _build_search_payload(
         open_set_decision=open_set_decision,
     )
 
+    expected_match = _expected_match_info(
+        expected_pid, results_list, query_vec, models.registry_index,
+    )
+
     return {
         "stage": "search",
         "results": results_list,
@@ -566,7 +643,9 @@ def _build_search_payload(
         ),
         "query_provenance": query_provenance,
         "expected_person_id": expected_pid,
-        "sim_top1_percentile": sim_top1_pct,
+        # Full-registry rank of the expected person; lets the UI say
+        # "expected at #42 sim 0.881" instead of just "not in top-5".
+        "expected_match": expected_match,
         "age_estimate": age_estimate,
     }
 
@@ -576,6 +655,7 @@ def run_fragment_search(
     tooth_indices: list[int],
     models: PipelineModels,
     config: PipelineConfig,
+    session_id: str | None = None,
 ) -> dict:
     """Phase 9.5 — re-pool a subset of cached tooth embeddings and re-search.
 
@@ -627,6 +707,7 @@ def run_fragment_search(
         config=config,
         panoramic_path=upload_for_provenance,
         sub_embs=sub_embs,
+        session_id=session_id,
     )
     payload["query_id"] = query_id
     payload["tooth_indices"] = indices
@@ -634,18 +715,17 @@ def run_fragment_search(
 
 
 def _query_provenance(upload_path: Path, sha256_to_pid: dict[str, str]) -> tuple[str, str | None]:
-    """Phase 9.2 — classify whether the uploaded query is a known registry image.
+    """Classify whether the uploaded query is a known canonical registry image.
 
     Returns (provenance, expected_person_id) where provenance is one of:
-        "self_match" — bytes match an enrolled panoramic; expected_person_id is set
-        "novel"      — bytes do not match any enrolled panoramic
+        "self_match" — bytes match an enrolled canonical panoramic
+        "novel"      — bytes do not match any enrolled canonical panoramic
         "unknown"    — could not read the upload (filesystem error)
 
-    Note that "self_match" means the *image* matches an enrolled image — the
-    deployed dataset only has one panoramic per person, so this is also the
-    "self" person. The "heldout" category (different image of an enrolled
-    person) is structurally impossible on this dataset but reserved for the
-    Phase 9.8 curated-OOS picks.
+    The "session_self_match" provenance (bytes are novel but the merged top-1
+    is a session enrolment with similarity ≥ 0.95) is decided in `run_pipeline`
+    AFTER the merge, not here, because this function only sees the canonical
+    SHA-256 → PID index.
     """
     try:
         h = hashlib.sha256(upload_path.read_bytes()).hexdigest()
@@ -791,10 +871,16 @@ def compute_query_vector_sync(
 # Phase 9.6 — OOD heuristic. The FDI classifier's argmax softmax is a cheap
 # proxy for "this looks like a tooth crop." Tooth crops typically score
 # >0.5; non-tooth photos collapse close to uniform over the 32-class
-# distribution (~0.03). A 0.25 cutoff catches obviously-non-tooth uploads
-# without rejecting genuinely-uncertain crops the user might still want to
-# proceed with (e.g. wisdom teeth at conf ~0.3-0.4).
-FDI_OOD_MAX_SOFTMAX = 0.25
+# distribution (~0.03). A panoramic dropped into the crops tab scored 0.36
+# in audit testing — well below a real crop, but above the original 0.25
+# floor. Tightened to 0.45 to refuse panoramic-as-crop while still admitting
+# legitimately-noisy wisdom-tooth crops (conf ~0.5+).
+FDI_OOD_MAX_SOFTMAX = 0.45
+# Single-tooth panoramic crops in this dataset are ≤512 px on the long
+# edge; a full panoramic is 1600+. If the long edge exceeds this, refuse the
+# file outright — it's almost certainly a panoramic uploaded into the wrong
+# tab, and pretending the FDI classifier can label it is misleading.
+CROPS_MAX_LONG_EDGE_PX = 800
 # If more than half the uploaded crops fail the OOD gate, abort the whole
 # identify-crops run with a friendly error — the user almost certainly
 # uploaded the wrong kind of files.
@@ -843,6 +929,26 @@ def compute_query_vector_from_crops(
         # 32 = FDI label space; more than that and the user is uploading
         # garbage. The panoramic path tops out at 32 too after dedup.
         raise ValueError("Too many crops — maximum is 32 tooth crops per query.")
+
+    # Refuse panoramics dropped into the crops tab. Real single-tooth crops
+    # in this dataset are typically ≤500 px on the long edge; a full panoramic
+    # is 1600+. The 800 px ceiling leaves comfortable headroom for unusually-
+    # large crops while still catching panoramics. The FDI classifier will
+    # happily emit a label for a panoramic — silently accepting one lets a
+    # confident-looking but wrong Top-5 ship.
+    oversized = [
+        (i, max(img.size))
+        for i, img in enumerate(crop_images)
+        if max(img.size) > CROPS_MAX_LONG_EDGE_PX
+    ]
+    if oversized:
+        sample = oversized[0]
+        raise ValueError(
+            f"Crop {sample[0] + 1} is {sample[1]} px on its long edge — that's "
+            "panoramic-sized. The crops tab is for single-tooth images "
+            f"(≤{CROPS_MAX_LONG_EDGE_PX} px). Use the Panoramic tab instead, "
+            "or pre-crop into individual teeth first."
+        )
 
     cfg = models.config
     device = models.device
@@ -1506,12 +1612,12 @@ async def run_pipeline(
         })
 
     # Calibrated quantities — `top1_top2_gap`, `confidence`, `open_set_*`,
-    # `similarity_percentile`, `age_estimate` — are all computed off the
-    # CANONICAL top-1 / top-2 (sims[0], sims[1]). The Phase 8.6 thresholds
-    # were learned on canonical pairs; extending them to session entries
-    # would invalidate the calibration semantics. The session-merge contract
-    # is "session entries may displace canonical entries in the visible
-    # ranking, but calibrated trust never extends to them."
+    # `age_estimate` — are all computed off the CANONICAL top-1 / top-2
+    # (sims[0], sims[1]). The Phase 8.6 thresholds were learned on canonical
+    # pairs; extending them to session entries would invalidate the
+    # calibration semantics. The session-merge contract is "session entries
+    # may displace canonical entries in the visible ranking, but calibrated
+    # trust never extends to them."
     canonical_top1 = float(sims[0])
     canonical_top2 = float(sims[1]) if len(sims) > 1 else 0.0
     top1_top2_gap = canonical_top1 - canonical_top2 if len(sims) > 1 else 1.0
@@ -1527,6 +1633,20 @@ async def run_pipeline(
     query_provenance, expected_pid = _query_provenance(
         panoramic_path, models.panoramic_sha256_to_pid,
     )
+    # Session self-match detection: if the canonical hash lookup said "novel"
+    # but the merged top-1 is a session enrolment with similarity ≥ 0.95, the
+    # user is verifying their own session enrolment via re-querying. Surface
+    # this as a distinct provenance so the UI can show an honest banner
+    # instead of "Novel upload" next to similarity ≈ 1.0.
+    if (
+        query_provenance == "novel"
+        and len(results_list) > 0
+        and bool(results_list[0].get("is_session"))
+        and float(results_list[0].get("similarity", 0.0)) >= 0.95
+    ):
+        query_provenance = "session_self_match"
+        expected_pid = results_list[0]["person_id"]
+
     # Phase 9.5.1 — age estimate, gated on open_set_decision and pool size.
     age_estimate = _estimate_age(
         age_head=models.age_head,
@@ -1535,25 +1655,6 @@ async def run_pipeline(
         pool_size=int(len(embeddings_arr)),
         open_set_decision=open_set_decision,
     )
-    # Phase 9.3 — empirical percentile of sim_top1 vs known-correct identifications.
-    sim_top1_pct = _sim_top1_percentile(float(sims[0]), models.sim_top1_in_registry_sorted)
-    # Percentile is well-defined ONLY for the canonical top-1 against the
-    # canonical reference distribution (740 rank-1 hits from held-out
-    # enrolment). Session entries get None. The canonical top-1 may sit at
-    # any merged rank (a session entry can displace it to rank 2 etc), so
-    # we identify it by person_id rather than by rank position.
-    canonical_top1_pid = str(neighbor_ids[0]) if len(neighbor_ids) > 0 else None
-    for r in results_list:
-        if (
-            not r.get("is_session")
-            and r["person_id"] == canonical_top1_pid
-        ):
-            r["similarity_percentile"] = _sim_top1_percentile(
-                r["similarity"], models.sim_top1_in_registry_sorted
-            )
-        else:
-            r["similarity_percentile"] = None
-
     # Per-tooth contribution: dot each tooth's embedding against the top-1
     # gallery profile. In ensemble mode we average the per-model contributions.
     # Phase 9.7 — when the top-1 is a session enrolment, reconstruct from the
@@ -1623,8 +1724,9 @@ async def run_pipeline(
             ),
             "query_provenance": query_provenance,
             "expected_person_id": expected_pid,
-            # Phase 9.3 — empirical percentile of top-1 sim against 740 in-registry refs.
-            "sim_top1_percentile": sim_top1_pct,
+            "expected_match": _expected_match_info(
+                expected_pid, results_list, query_vec, models.registry_index,
+            ),
             # Phase 9.4 — Phase 8.10 age estimate (sex head intentionally not wired).
             "age_estimate": age_estimate,
             # Phase 9.5 — query_id so the frontend can hit /api/search-fragment.
@@ -1821,19 +1923,6 @@ async def run_crops_pipeline(
         open_set_decision=open_set_decision,
     )
 
-    sim_top1_pct = _sim_top1_percentile(canonical_top1, models.sim_top1_in_registry_sorted)
-    canonical_top1_pid = str(neighbor_ids[0]) if len(neighbor_ids) > 0 else None
-    for r in results_list:
-        if (
-            not r.get("is_session")
-            and r["person_id"] == canonical_top1_pid
-        ):
-            r["similarity_percentile"] = _sim_top1_percentile(
-                r["similarity"], models.sim_top1_in_registry_sorted
-            )
-        else:
-            r["similarity_percentile"] = None
-
     # Tooth contributions against the displayed top-1 (canonical or session).
     tooth_contributions: list[dict] = []
     try:
@@ -1909,11 +1998,16 @@ async def run_crops_pipeline(
             ),
             "query_provenance": query_provenance,
             "expected_person_id": expected_pid,
-            "sim_top1_percentile": sim_top1_pct,
             "age_estimate": age_estimate,
             "query_id": query_id,
             # Phase 9.6 marker — UI flips the results-header copy on this.
             "crops_mode": True,
+            # Phase 9.6.1 — per-crop outcomes echoed on the search-stage
+            # payload so the results view can surface auto-FDI labels, OOD
+            # rejections, and duplicate drops back to the uploaded thumbnails
+            # (the validate-stage emission lands during a stage transition
+            # the results card doesn't observe).
+            "per_crop": per_crop_records,
         },
     }
 

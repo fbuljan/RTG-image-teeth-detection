@@ -85,7 +85,7 @@ export function SessionEnrolments({
             </span>
           </h2>
           <p className="text-xs text-slate-500 dark:text-slate-400">
-            Scoped to this browser session. Canonical 1,178-person registry is read-only.
+            Scoped to this browser. Canonical registry is read-only.
           </p>
         </div>
         {items.length > 0 && (
