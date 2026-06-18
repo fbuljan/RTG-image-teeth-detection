@@ -254,6 +254,47 @@ def _resolve_artefacts(cfg: "PipelineConfig") -> None:
         print(f"[pipeline] WARN: age head not in HF repo ({_scrub(str(exc))}); "
               "age estimates will be null")
 
+    # 5. Registry panoramics. The /api/registry/{pid}/panoramic endpoint
+    #    reads from `dataset_raw/<id>/<id>.png` per the meta's panoramic_path
+    #    field. There are 1,178 of these (~1.75 GB). snapshot_download with
+    #    a glob pattern grabs them all in one parallelized call; we then
+    #    symlink the cached `dataset_raw/` tree under PROJECT_ROOT so the
+    #    existing endpoint code reads from the expected location without
+    #    knowing about HF.
+    #
+    #    Best-effort: if the upload isn't complete or the pattern matches
+    #    nothing, the registry browser will 404 individual downloads but
+    #    the rest of the pipeline still works.
+    try:
+        from huggingface_hub import snapshot_download
+        pano_snapshot = Path(snapshot_download(
+            repo_id=repo_id,
+            revision=revision,
+            cache_dir=str(cache_root),
+            token=os.environ.get("HF_TOKEN"),
+            allow_patterns=["dataset_raw/*/*.png"],
+        ))
+        pano_src = pano_snapshot / "dataset_raw"
+        if pano_src.exists():
+            pano_target = PROJECT_ROOT / "dataset_raw"
+            if pano_target.is_symlink() or pano_target.exists():
+                try:
+                    pano_target.unlink()
+                except (OSError, IsADirectoryError):
+                    # Existing real directory (local dev artefact). Leave it.
+                    pass
+            if not pano_target.exists():
+                try:
+                    pano_target.symlink_to(pano_src)
+                    print(f"[pipeline] dataset_raw symlinked → {pano_src}")
+                except OSError as exc:
+                    print(f"[pipeline] WARN: could not symlink dataset_raw "
+                          f"({_scrub(str(exc))}); registry panoramic download "
+                          "will 404")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[pipeline] WARN: panoramic snapshot failed "
+              f"({_scrub(str(exc))}); registry panoramic download will 404")
+
     print(f"[pipeline] artefacts resolved into {cache_root}")
 
 
