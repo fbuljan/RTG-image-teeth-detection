@@ -16,13 +16,15 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import re
 import shutil
 import uuid
 from pathlib import Path
 
 import yaml
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
@@ -43,20 +45,143 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 app = FastAPI(title="Tooth Identification Demo", version="0.1.0")
 
-# Allow the Next.js dev server (default port 3000, plus 3005 as an alt port
-# used when the canonical 3000 is occupied by another process).
+# CORS allowlist. In local dev (no `ALLOWED_ORIGINS` env var) we trust the
+# Next.js dev server on 3000/3005. In a deployed Space, the operator sets
+# `ALLOWED_ORIGINS` to a comma-separated list of exact origins (e.g.
+# "https://rtg-demo.vercel.app"). `ALLOWED_ORIGIN_REGEX` adds a regex for
+# Vercel preview URLs ("https://rtg-demo-.*\.vercel\.app").
+_DEV_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3005",
+    "http://127.0.0.1:3005",
+]
+_allowed_env = os.environ.get("ALLOWED_ORIGINS", "")
+_cors_origins = (
+    [o.strip() for o in _allowed_env.split(",") if o.strip()]
+    if _allowed_env
+    else _DEV_ORIGINS
+)
+_cors_regex = os.environ.get("ALLOWED_ORIGIN_REGEX") or None
+
+# Refuse "*" with credentials — CORS spec requires explicit origins when
+# credentials flow, and browsers will block requests anyway. Better to fail
+# loudly at boot than to let a misconfigured Space silently expose a
+# credentials-accepting wildcard.
+if "*" in _cors_origins:
+    raise RuntimeError(
+        "ALLOWED_ORIGINS contains '*', which is incompatible with "
+        "allow_credentials=True. Set ALLOWED_ORIGINS to the explicit "
+        "frontend origin (e.g. https://rtg-demo.vercel.app)."
+    )
+# Same hazard with overly-permissive regex. A regex like
+# `https://.*\.vercel\.app` allows ANY Vercel project to read the API —
+# anyone with a Vercel account could point a phishing app at this backend.
+# Operators should pin to their specific project: `https://rtg-demo-.*\.vercel\.app`.
+if _cors_regex and (_cors_regex.strip() in (".*", "https://.*")):
+    raise RuntimeError(
+        f"ALLOWED_ORIGIN_REGEX={_cors_regex!r} is too permissive. Pin to "
+        "your specific Vercel project, e.g. "
+        "'https://rtg-demo-[a-z0-9-]+\\.vercel\\.app'."
+    )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3005",
-        "http://127.0.0.1:3005",
-    ],
+    allow_origins=_cors_origins,
+    allow_origin_regex=_cors_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------- Upload size guard ----------
+#
+# Panoramic uploads are normally 1-5 MB. A 200 MB PNG fed into PIL OOMs the
+# 16 GB Space surprisingly fast (decoded bitmap = width × height × 4 bytes
+# regardless of compressed file size). Reject early via Content-Length.
+#
+# This catches honest mistakes and trivial DoS attempts; a hostile client
+# can omit Content-Length and stream chunked, which we backstop by re-checking
+# the actual byte count after `file.read()` in the handlers that already do
+# that (see `_require_upload_under_cap`).
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 15 * 1024 * 1024))
+
+# Query IDs are lowercase hex minted via uuid.uuid4().hex[:12]. Validated on
+# every endpoint that accepts one in a path/body so a malicious value can't
+# reach the filesystem layer.
+_QUERY_ID_RE = re.compile(r"^[a-f0-9]{1,32}$")
+
+
+def require_upload_size_ok(request: Request) -> None:
+    """FastAPI dependency: 413 if Content-Length exceeds the cap.
+
+    Chunked uploads (no Content-Length header) are allowed through here; the
+    per-handler post-read check enforces the cap on the actual byte count.
+    """
+    cl = request.headers.get("content-length")
+    if cl is None:
+        return
+    try:
+        n = int(cl)
+    except ValueError:
+        return
+    if n > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Upload exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MB cap",
+        )
+
+
+def _safe_join(base: Path, *parts: str) -> Path:
+    """Join `parts` onto `base` and 400 if the resolved path escapes `base`.
+
+    Defends against `..`, absolute components, URL-decoded variants, and
+    symlinks that point outside the expected directory. Uses `Path.resolve(
+    strict=False)` so the caller can still 404 cleanly when the target file
+    doesn't exist (vs. mixing 404s with 400s).
+    """
+    if any(p is None for p in parts):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if any(("/" in p) or ("\\" in p) or (".." in p) or p.startswith(".") for p in parts):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    base_resolved = base.resolve(strict=False)
+    target = (base / Path(*parts)).resolve(strict=False)
+    try:
+        target.relative_to(base_resolved)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    return target
+
+
+def _copy_upload_capped(src, dst_path: Path) -> int:
+    """Copy `src` (an UploadFile's underlying SpooledTemporaryFile) to
+    `dst_path`, aborting + 413-ing if more than `MAX_UPLOAD_BYTES` are read.
+
+    The Content-Length dependency catches honest clients; this catches the
+    chunked-without-Content-Length case where the server only learns the
+    true size during the body stream.
+    """
+    written = 0
+    chunk_size = 1024 * 1024  # 1 MB
+    with open(dst_path, "wb") as out:
+        while True:
+            chunk = src.read(chunk_size)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > MAX_UPLOAD_BYTES:
+                out.close()
+                try:
+                    dst_path.unlink()
+                except OSError:
+                    pass
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Upload exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MB cap",
+                )
+            out.write(chunk)
+    return written
 
 config = PipelineConfig()
 models = PipelineModels(config=config)
@@ -130,9 +255,25 @@ def download_panoramic(person_id: str):
     meta = models.registry_meta.get(person_id)
     if meta is None:
         raise HTTPException(status_code=404, detail="Person not found in registry")
-    panoramic_path = PROJECT_ROOT / meta["panoramic_path"]
-    if not panoramic_path.exists():
+    rel = meta.get("panoramic_path", "")
+    # `panoramic_path` comes from registry_meta.json, which is shipped with
+    # the deployment. Still defend against a future operator pointing it at
+    # something it shouldn't: reject obvious bad strings up-front and verify
+    # the resolved path stays under PROJECT_ROOT.
+    if not rel or rel.startswith("/") or ".." in rel:
         raise HTTPException(status_code=404, detail="Panoramic file missing on disk")
+    # `strict=True` resolves symlinks and raises FileNotFoundError when the
+    # target doesn't exist (cleaner 404 path than mixing strict=False with
+    # an extra .exists() check). Then we re-check containment AFTER symlink
+    # resolution so a malicious symlink can't smuggle a path outside root.
+    try:
+        panoramic_path = (PROJECT_ROOT / rel).resolve(strict=True)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Panoramic file missing on disk")
+    try:
+        panoramic_path.relative_to(PROJECT_ROOT.resolve(strict=True))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid panoramic path")
     return FileResponse(
         panoramic_path,
         media_type="image/png",
@@ -389,15 +530,17 @@ def get_model_card() -> dict:
 @app.get("/api/intermediate/{query_id}/{filename}")
 def serve_intermediate(query_id: str, filename: str):
     """Serve intermediate overlay images written during a pipeline run."""
-    if "/" in query_id or "/" in filename or ".." in filename:
-        raise HTTPException(status_code=400, detail="Invalid path")
-    target = config.temp_dir / query_id / filename
+    # Query IDs are lowercase hex (uuid4().hex[:12]); reject anything else
+    # before the path join so a malicious value can't even reach `_safe_join`.
+    if not _QUERY_ID_RE.fullmatch(query_id):
+        raise HTTPException(status_code=400, detail="Invalid query_id")
+    target = _safe_join(config.temp_dir, query_id, filename)
     if not target.exists():
         raise HTTPException(status_code=404, detail="Intermediate file not found")
     return FileResponse(target, media_type="image/png")
 
 
-@app.post("/api/identify")
+@app.post("/api/identify", dependencies=[Depends(require_upload_size_ok)])
 async def identify(
     file: UploadFile = File(...),
     mode: str = Form("segmentation"),
@@ -432,8 +575,10 @@ async def identify(
     query_dir.mkdir(parents=True, exist_ok=True)
 
     upload_path = query_dir / "upload.png"
-    with open(upload_path, "wb") as out:
-        shutil.copyfileobj(file.file, out)
+    # Off the event loop — copying a 15 MB upload one chunk at a time is
+    # ~15 sync reads, fine on a fast disk but still blocking. Threadpool
+    # keeps the loop responsive to /api/health during big uploads.
+    await run_in_threadpool(_copy_upload_capped, file.file, upload_path)
 
     async def event_stream():
         try:
@@ -468,8 +613,6 @@ class FragmentSearchRequest(BaseModel):
     query_id: str
     tooth_indices: list[int]
 
-
-_QUERY_ID_RE = re.compile(r"^[a-f0-9]{1,32}$")
 
 # Header name needed both here and by the session-aware endpoints further
 # down — declared early so the search-fragment default-arg can reference it.
@@ -517,11 +660,15 @@ def search_fragment(
 # plus a small buffer. Anything larger means the user is uploading garbage.
 MAX_CROPS_PER_QUERY = 32
 # Per-crop file size. Tooth crops are typically tens of KB; cap at 5 MB so
-# a single bad file doesn't OOM the embedder.
+# a single oversized file doesn't OOM the embedder. The AGGREGATE upload
+# size is bounded by `MAX_UPLOAD_BYTES` (Content-Length dependency on this
+# route), so even though 32×5MB could in theory total 160 MB, the request
+# itself is refused at 15 MB. This per-file cap is the defense for the case
+# where the request is small in total but one file is anomalously big.
 MAX_CROP_BYTES = 5 * 1024 * 1024
 
 
-@app.post("/api/identify-crops")
+@app.post("/api/identify-crops", dependencies=[Depends(require_upload_size_ok)])
 async def identify_crops(
     files: list[UploadFile] = File(...),
     fdi_overrides_json: str | None = Form(None),
@@ -628,10 +775,10 @@ DUPLICATE_Z_THRESHOLD = 0.7
 # SESSION_ID_HEADER declared earlier (before /api/search-fragment, which also
 # uses it). Don't redeclare here.
 ENROLMENT_NAME_MAX_LEN = 40
-# Panoramic uploads are normally 1-5 MB. Cap at 25 MB to defang an OOM
-# attack — a malicious client could otherwise POST gigabyte-sized PNGs and
-# materialize them in memory inside `await file.read()`.
-MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+# `MAX_UPLOAD_BYTES` is declared near the top of the file (env-driven, default
+# 15 MB) and applied as a FastAPI dependency on every upload endpoint. The
+# post-read check below catches chunked uploads that bypassed the
+# Content-Length guard.
 
 
 def _require_session_id(session_id: str | None) -> str:
@@ -657,7 +804,7 @@ def _session_top1(query_vec, session_id: str) -> tuple[float | None, str | None]
     return float(sims[0]), str(ids[0])
 
 
-@app.post("/api/enrol")
+@app.post("/api/enrol", dependencies=[Depends(require_upload_size_ok)])
 async def enrol(
     file: UploadFile = File(...),
     fake_name: str = Form(...),
@@ -706,7 +853,13 @@ async def enrol(
     tmp_pano.write_bytes(pano_bytes)
 
     try:
-        embed_result = compute_query_vector_sync(tmp_pano, models, mode=mode)
+        # Off the event loop — compute_query_vector_sync runs YOLO + FDI +
+        # embedder forward passes that take ~1-2 s on CPU. Without
+        # run_in_threadpool a second concurrent enrol would block the entire
+        # API including health checks until the first one finishes.
+        embed_result = await run_in_threadpool(
+            compute_query_vector_sync, tmp_pano, models, mode=mode
+        )
     except ValueError as exc:
         if tmp_pano.exists():
             tmp_pano.unlink()

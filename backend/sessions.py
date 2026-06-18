@@ -302,8 +302,14 @@ def delete_enrolment(
 
 
 def cleanup_expired_sessions(sessions_root: Path) -> int:
-    """Delete sessions older than SESSION_TTL_SECONDS (created_at). Returns
-    the number of sessions removed.
+    """Delete sessions whose most recent activity is older than
+    SESSION_TTL_SECONDS. Returns the number of sessions removed.
+
+    Uses `updated_at` (last enrol / delete / mutation) so an active session
+    that's been alive for >24h but is still being used isn't blown away
+    mid-flow. Falls back to `created_at` for legacy meta written before the
+    field was added, and finally to filesystem `mtime` if meta is missing
+    entirely (don't leak orphan dirs).
     """
     if not sessions_root.exists():
         return 0
@@ -313,11 +319,15 @@ def cleanup_expired_sessions(sessions_root: Path) -> int:
         if not sdir.is_dir() or not is_valid_session_id(sdir.name):
             continue
         meta = load_session_meta(sessions_root, sdir.name)
-        # If we can't read meta, fall back to mtime so we don't leak the dir.
-        created_at = (
-            float(meta.get("created_at", 0.0)) if meta else sdir.stat().st_mtime
-        )
-        if created_at < cutoff:
+        if meta:
+            last_active = float(
+                meta.get("updated_at")
+                or meta.get("created_at")
+                or 0.0
+            )
+        else:
+            last_active = sdir.stat().st_mtime
+        if last_active < cutoff:
             shutil.rmtree(sdir, ignore_errors=True)
             removed += 1
     return removed

@@ -216,6 +216,13 @@ frontend/out/
 # Local deployment plan (not part of the thesis demo source)
 DEPLOY.md
 
+# Deployment env vars (HF token, Vercel token, etc.). Template lives in
+# .env.deploy.example — copy it to .env.deploy and fill in.
+.env.deploy
+
+# HF Hub artefact cache populated at runtime by `_resolve_artefacts()`.
+backend/.artefact_cache/
+
 # Playwright MCP transient artifacts
 .playwright-mcp/
 

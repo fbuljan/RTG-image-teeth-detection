@@ -54,6 +54,209 @@ def _default_registry_dir() -> Path:
     return PROJECT_ROOT / "identification/registry_ensemble_yolo/embedding_fdi_init_v1"
 
 
+# ---------- Artefact resolution (local-dev path vs HF Hub deploy path) ----------
+#
+# When `HF_REPO_ID` is unset (local development), every artefact lives at its
+# in-repo Path and load_all() reads it directly. When `HF_REPO_ID` is set
+# (deployed Space), `_resolve_artefacts()` runs once at startup, pulls every
+# artefact from a private HF Hub model repo pinned by `HF_REVISION`, and
+# rewrites the PipelineConfig paths to point at the local cache. Everything
+# downstream stays oblivious to the source.
+#
+# Required env vars in deployed mode:
+#   HF_REPO_ID    e.g. "<user>/rtg-tooth-id-weights"
+#   HF_REVISION   commit sha pinned at upload time (DO NOT use "main")
+#   HF_TOKEN      read token for the private repo
+#
+# Optional:
+#   HF_HOME       cache dir; defaults to ~/.cache/huggingface
+
+ARTEFACT_MANIFEST: dict[str, str] = {
+    # Local-config-field name → filename inside the HF model repo.
+    "yolo_weights": "yolo_det.pt",
+    "yolo_seg_weights": "yolo_seg.pt",
+    "fdi_classifier": "fdi_classifier.pt",
+    "embedder": "embedder.pt",
+}
+
+# Registry directory contents: every file the demo reads at startup. Pulled
+# into a single local directory the load path then opens.
+REGISTRY_FILES: tuple[str, ...] = (
+    "registry/index.faiss",
+    "registry/index.ids.json",
+    "registry/registry_meta.json",
+)
+
+# Model-card JSON artefacts surfaced through /api/model-card. Keyed by the
+# in-repo relative path so the local-dev fallback (PROJECT_ROOT / path) and
+# the deployed override land at the same logical location.
+#
+# Anything not in this list will be em-dashed in the UI on the deployed
+# Space — non-critical (per-category breakdowns, subgroup CSVs, the offline
+# GT-only ensemble comparator). Headline numbers (R1 sweep, AUROC, cohort
+# breakdown, rotation stress, age head) ARE here.
+MODEL_CARD_ARTEFACTS: tuple[str, ...] = (
+    # Open-set calibration + AUROC headline.
+    "identification/runs/phase8_open_set/phase8_open_set_calibration.json",
+    "identification/runs/phase8_open_set/results.json",
+    # Deployed YOLO-built registry sweep (R1@n=16 = 82.6%, headline number).
+    "identification/runs/phase8_deployed_yolo_reg/heldout_enrol.json",
+    "identification/runs/phase8_deployed_yolo_reg/yolo_eval.json",
+    "identification/runs/phase8_deployed_yolo_reg/rotation_stress.json",
+    # Person-level cohort breakdown (mixed-dentition floor, all-permanent ceiling).
+    "identification/runs/phase8_permanent/subset_eval.json",
+    # Embedder run-dir contents — referenced from `config.embedder.parent`
+    # in _build_model_card (eval_test/, analysis/, config.yaml).
+    "identification/runs/embedding_fdi_init_v1/eval_test/metrics.json",
+    "identification/runs/embedding_fdi_init_v1/analysis/person_retrieval/metrics.json",
+    "identification/runs/embedding_fdi_init_v1/analysis/per_tooth/per_category_metrics.csv",
+    "identification/runs/embedding_fdi_init_v1/analysis/subgroups/all_subgroups.csv",
+    "identification/runs/embedding_fdi_init_v1/config.yaml",
+    # YOLO detector + segmenter metrics summary.
+    "runs-segmentation/metrics_summary.json",
+)
+
+# Optional: age head. Loaded best-effort; missing file means age estimates
+# return null but the rest of the pipeline still works.
+AGE_HEAD_REL_PATH = "identification/runs/demographic_v2/age_head.pt"
+
+
+def _hf_artefact_cache_root() -> Path:
+    """Where downloaded artefacts land. Resolved fresh each call so tests
+    can monkey-patch `HF_HOME` between runs."""
+    return Path(os.environ.get("DEMO_ARTEFACT_CACHE", PROJECT_ROOT / "backend/.artefact_cache"))
+
+
+def _resolve_artefacts(cfg: "PipelineConfig") -> None:
+    """When deployed, download artefacts from HF Hub and rewrite config paths.
+
+    Local dev (no `HF_REPO_ID` env var) → no-op; existing `Path` defaults are
+    used as-is.
+
+    Deployed (`HF_REPO_ID` set) → for each artefact in `ARTEFACT_MANIFEST`,
+    `REGISTRY_FILES`, `MODEL_CARD_ARTEFACTS`, and `AGE_HEAD_REL_PATH`:
+    download from the pinned revision into `_hf_artefact_cache_root()` and
+    overwrite the corresponding field on `cfg`. After this call, every Path
+    on `cfg` points at a local file.
+
+    Why rewrite instead of always-using `hf_hub_download` per consumer: keeps
+    `load_all()` and every downstream reader (visualization, evaluate
+    scripts, /api/model-card) blissfully unaware of HF. Same Path API, just
+    a different location on disk.
+    """
+    repo_id = os.environ.get("HF_REPO_ID")
+    if not repo_id:
+        return  # local dev — nothing to do
+
+    revision = os.environ.get("HF_REVISION")
+    if not revision:
+        raise RuntimeError(
+            "HF_REPO_ID is set but HF_REVISION is not. Pin a specific commit "
+            "SHA — using 'main' would silently shift weights under a running "
+            "Space and break reproducibility."
+        )
+
+    # Local import so the dependency only matters in deployed mode.
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import HfHubHTTPError
+
+    cache_root = _hf_artefact_cache_root()
+    cache_root.mkdir(parents=True, exist_ok=True)
+
+    def _scrub(msg: str) -> str:
+        # Never let HF_TOKEN leak into logs. The token can appear in
+        # huggingface_hub's exception messages when constructed from authed
+        # URLs; redact aggressively.
+        tok = os.environ.get("HF_TOKEN")
+        if tok and tok in msg:
+            msg = msg.replace(tok, "<HF_TOKEN>")
+        return msg
+
+    def _fetch(filename: str) -> Path:
+        try:
+            return Path(hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                revision=revision,
+                cache_dir=str(cache_root),
+                token=os.environ.get("HF_TOKEN"),
+            ))
+        except HfHubHTTPError as exc:
+            raise RuntimeError(
+                f"HF Hub download failed for '{filename}': "
+                f"{_scrub(str(exc))} — check HF_TOKEN scope and HF_REVISION."
+            ) from None
+        except Exception as exc:  # network blip, dns, etc.
+            raise RuntimeError(
+                f"HF Hub download error for '{filename}': {_scrub(str(exc))}"
+            ) from None
+
+    print(f"[pipeline] resolving artefacts from {repo_id}@{revision[:8]}…")
+
+    # 1. Model checkpoints — rewrite Path fields in-place.
+    for field_name, filename in ARTEFACT_MANIFEST.items():
+        local = _fetch(filename)
+        setattr(cfg, field_name, local)
+
+    # 2. Registry directory — pull every file, then point `registry_dir` at
+    #    whatever directory the first file landed in. hf_hub_download returns
+    #    files in a deterministic per-revision dir, so all three land siblings.
+    registry_local_paths = [_fetch(f) for f in REGISTRY_FILES]
+    # `hf_hub_download` namespaces by snapshot/<sha>/<filename>, but for the
+    # registry trio we want them in one folder — symlink them into a
+    # canonical subdir keyed by revision so `RetrievalIndex.load(<dir>/index)`
+    # finds both `index.faiss` and `index.ids.json` next to each other.
+    canonical_registry = cache_root / f"registry-{revision[:12]}"
+    canonical_registry.mkdir(parents=True, exist_ok=True)
+    for src in registry_local_paths:
+        # Strip the "registry/" prefix the HF repo uses.
+        dst = canonical_registry / src.name
+        if not dst.exists():
+            try:
+                dst.symlink_to(src)
+            except OSError:
+                # Fallback for filesystems without symlink support (rare on
+                # Linux Spaces but cheap insurance).
+                import shutil as _sh
+                _sh.copyfile(src, dst)
+    cfg.registry_dir = canonical_registry
+
+    # 3. Model-card JSON artefacts — these are read via
+    #    `PROJECT_ROOT / "identification/runs/..."` in load_all + app.py.
+    #    Mirror the files at the expected in-repo paths so the existing
+    #    readers Just Work. We unlink + replace on every boot: if `HF_REVISION`
+    #    bumped, a prior stale symlink/copy would otherwise silently pin the
+    #    Space to the old artefacts — cache poisoning across redeploys.
+    def _mirror(rel_path: str) -> None:
+        target = PROJECT_ROOT / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Unlink any prior copy/symlink to defeat stale baked-in files.
+        if target.is_symlink() or target.exists():
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        local = _fetch(rel_path)
+        try:
+            target.symlink_to(local)
+        except OSError:
+            import shutil as _sh
+            _sh.copyfile(local, target)
+
+    for rel_path in MODEL_CARD_ARTEFACTS:
+        _mirror(rel_path)
+
+    # 4. Age head — best-effort, mirror at expected path. Missing on HF is
+    #    survivable: pipeline emits null age estimates instead of crashing.
+    try:
+        _mirror(AGE_HEAD_REL_PATH)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[pipeline] WARN: age head not in HF repo ({_scrub(str(exc))}); "
+              "age estimates will be null")
+
+    print(f"[pipeline] artefacts resolved into {cache_root}")
+
+
 @dataclass
 class PipelineConfig:
     """Per-server configuration that drives the pipeline."""
@@ -128,6 +331,10 @@ class PipelineModels:
     device: str = "cpu"
 
     def load_all(self) -> None:
+        # 0. In deployed mode, pull artefacts from HF Hub and rewrite the
+        #    config Path fields. No-op in local dev.
+        _resolve_artefacts(self.config)
+
         self.device = self.config.device()
         print(f"[pipeline] device={self.device}")
 
