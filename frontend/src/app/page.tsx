@@ -450,7 +450,15 @@ function applyEvent(
       setPipeline((prev) => ({
         ...prev,
         [stage]: "done",
-        currentImageUrl: evt.data.annotated_image_url ?? prev.currentImageUrl,
+        // The FDI overlay already carries the segmentation polygons baked in, so
+        // we skip the intermediate segment_overlay.png swap — it would force the
+        // browser to fetch a near-identical PNG only to replace it ~1s later
+        // when the FDI overlay arrives. On a slow backend that race shows up as
+        // "lines appear after the Number pill turns green". Only swap on `fdi`.
+        currentImageUrl:
+          rawStage === "fdi"
+            ? evt.data.annotated_image_url ?? prev.currentImageUrl
+            : prev.currentImageUrl,
         toothCount:
           typeof evt.data.n_teeth === "number" ? evt.data.n_teeth : prev.toothCount,
       }));

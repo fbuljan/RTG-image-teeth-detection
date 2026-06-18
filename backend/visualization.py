@@ -69,7 +69,7 @@ def render_segmentation_overlay(
     """Save a copy of `panoramic_path` with each tooth mask drawn as a colored contour."""
     img = Image.open(panoramic_path).convert("RGB")
     draw = ImageDraw.Draw(img)
-    line_width = max(2, int(min(img.size) * 0.003))
+    line_width = max(3, int(min(img.size) * 0.005))
     for i, polygon in enumerate(polygons):
         color = _color_for(i)
         pts = [(float(x), float(y)) for x, y in polygon]
@@ -97,8 +97,10 @@ def render_fdi_overlay(
     img = Image.open(panoramic_path).convert("RGB")
     draw = ImageDraw.Draw(img)
 
-    line_width = max(2, int(min(img.size) * 0.003))
-    font_size = max(14, int(min(img.size) * 0.022))
+    line_width = max(3, int(min(img.size) * 0.005))
+    # Floor/ceiling so tiny crops stay readable and giant panoramics don't get
+    # billboard-sized labels. ~38px on a typical 1300x2500 panoramic.
+    font_size = max(28, min(72, int(min(img.size) * 0.038)))
     font = _load_font(font_size)
 
     bbox_list = list(bboxes)
