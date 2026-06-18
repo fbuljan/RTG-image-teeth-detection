@@ -29,11 +29,6 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from backend.visualization import (
-    render_fdi_overlay,
-    render_segmentation_overlay,
-    render_yolo_overlay,
-)
 from identification.data.tooth_dataset import IMAGENET_MEAN, IMAGENET_STD
 from identification.evaluation.evaluate_embedding import load_checkpoint as load_embedder_checkpoint
 from identification.models.classifier import ToothClassifier
@@ -1400,12 +1395,9 @@ async def run_pipeline(
 
     n_teeth = len(bboxes)
 
-    overlay_filename = f"{stage_name}_overlay.png"
-    overlay_path = query_dir / overlay_filename
-    if mode == "segmentation":
-        render_segmentation_overlay(panoramic_path, polygons, overlay_path)
-    else:
-        render_yolo_overlay(panoramic_path, bboxes.tolist(), overlay_path)
+    # Overlays now ride on the wire as polygon/bbox coords and are rendered on
+    # the frontend as SVG + DOM. This avoids the 1.5 MB PNG-fetch bottleneck
+    # that on slow links caused "lines/labels appear after the Done badge".
     timings[stage_name] = (time.perf_counter() - t0) * 1000
 
     yield {
@@ -1414,7 +1406,6 @@ async def run_pipeline(
             "stage": stage_name,
             "mode": mode,
             "n_teeth": int(n_teeth),
-            "annotated_image_url": f"/api/intermediate/{query_id}/{overlay_filename}",
             "elapsed_ms": round(timings[stage_name], 1),
         },
     }
@@ -1527,14 +1518,28 @@ async def run_pipeline(
 
     n_uncertain = int(sum(1 for c in fdi_conf_kept if c < 0.5))
 
-    fdi_overlay = query_dir / "fdi_overlay.png"
-    render_fdi_overlay(
-        panoramic_path,
-        bboxes_kept.tolist(),
-        fdi_kept,
-        fdi_overlay,
-        polygons=polygons_kept,
-    )
+    # Native panoramic dims so the frontend can scale percentage-positioned
+    # overlay elements (SVG polygons + label chips) over the uploaded image.
+    with Image.open(panoramic_path) as _pano:
+        image_width, image_height = _pano.size
+
+    tooth_overlays: list[dict] = []
+    bboxes_kept_list = bboxes_kept.tolist()
+    for i, (bbox, fdi) in enumerate(zip(bboxes_kept_list, fdi_kept)):
+        entry: dict = {
+            "fdi": str(fdi),
+            "bbox": [float(b) for b in bbox],
+        }
+        if polygons_kept is not None and i < len(polygons_kept):
+            poly = polygons_kept[i]
+            if len(poly) >= 3:
+                # Round to 1 decimal to halve payload size — sub-pixel precision
+                # is irrelevant once we render through CSS scaling.
+                entry["polygon"] = [
+                    [round(float(x), 1), round(float(y), 1)] for x, y in poly
+                ]
+        tooth_overlays.append(entry)
+
     timings["fdi"] = (time.perf_counter() - t0) * 1000
 
     # `dropped[]` is the structured drop list (count via n_dropped).
@@ -1552,7 +1557,9 @@ async def run_pipeline(
             "n_uncertain": n_uncertain,
             "n_dropped": len(dropped),
             "dropped": dropped_detail,
-            "annotated_image_url": f"/api/intermediate/{query_id}/fdi_overlay.png",
+            "image_width": image_width,
+            "image_height": image_height,
+            "tooth_overlays": tooth_overlays,
             "elapsed_ms": round(timings["fdi"], 1),
         },
     }

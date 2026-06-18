@@ -1,6 +1,6 @@
 "use client";
 
-import { intermediateUrl } from "@/lib/api";
+import { intermediateUrl, type ToothOverlay } from "@/lib/api";
 
 export type StageState = "idle" | "active" | "done";
 
@@ -31,7 +31,31 @@ export type PipelineState = {
   // When true, stageA label becomes "Validate" and the FDI stage is hidden
   // (validate folds FDI assignment + dedup + OOD gate).
   cropsMode?: boolean;
+  // Per-tooth FDI label + bbox + (optional) polygon, in image-native pixels.
+  // When present, the pipeline panel layers SVG outlines + DOM number chips
+  // over the user's uploaded image — no overlay PNG fetched on the hot path.
+  toothOverlays?: ToothOverlay[];
+  imageWidth?: number;
+  imageHeight?: number;
 };
+
+// 16-color palette mirroring backend/visualization.py PALETTE so the demo
+// looks identical to the old PNG renderer for users who saw the prior build.
+const OVERLAY_PALETTE = [
+  "rgb(231, 76, 60)", "rgb(46, 204, 113)", "rgb(52, 152, 219)", "rgb(241, 196, 15)",
+  "rgb(155, 89, 182)", "rgb(26, 188, 156)", "rgb(230, 126, 34)", "rgb(52, 73, 94)",
+  "rgb(192, 57, 43)", "rgb(39, 174, 96)", "rgb(41, 128, 185)", "rgb(243, 156, 18)",
+  "rgb(142, 68, 173)", "rgb(22, 160, 133)", "rgb(211, 84, 0)", "rgb(44, 62, 80)",
+];
+
+function colorForFdi(fdi: string): string {
+  const n = Number(fdi);
+  if (Number.isFinite(n)) return OVERLAY_PALETTE[n % OVERLAY_PALETTE.length];
+  // Non-numeric FDI (shouldn't happen, but be defensive): hash the string.
+  let h = 0;
+  for (let i = 0; i < fdi.length; i++) h = (h * 31 + fdi.charCodeAt(i)) & 0xff;
+  return OVERLAY_PALETTE[h % OVERLAY_PALETTE.length];
+}
 
 type Props = {
   state: PipelineState;
@@ -97,11 +121,11 @@ export function PipelineProgress({ state }: Props) {
 
       <div className="px-6 py-6">
         {state.currentImageUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
+          <ImageWithOverlays
             src={intermediateUrl(state.currentImageUrl)}
-            alt="Pipeline visualization"
-            className="mx-auto max-h-[500px] w-full max-w-3xl rounded-xl border border-slate-200 object-contain shadow dark:border-slate-800"
+            overlays={state.toothOverlays}
+            imageWidth={state.imageWidth}
+            imageHeight={state.imageHeight}
           />
         ) : (
           <div className="flex h-64 items-center justify-center rounded-xl border border-dashed border-slate-300 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">
@@ -164,5 +188,102 @@ export function PipelineProgress({ state }: Props) {
         )}
       </div>
     </section>
+  );
+}
+
+// Renders the user's panoramic with optional SVG polygon outlines and DOM
+// label chips for each tooth. All overlay coords arrive in image-native pixel
+// space, so the SVG viewBox matches that and CSS scales everything together.
+// Labels are HTML so they stay crisp at any display size — the prior
+// implementation baked them into a 2775-px PNG that browsers then averaged
+// down to ~700px, making numbers fuzzy.
+function ImageWithOverlays({
+  src,
+  overlays,
+  imageWidth,
+  imageHeight,
+}: {
+  src: string;
+  overlays?: ToothOverlay[];
+  imageWidth?: number;
+  imageHeight?: number;
+}) {
+  const hasOverlays =
+    overlays && overlays.length > 0 && imageWidth && imageHeight;
+
+  return (
+    <div className="relative mx-auto w-full max-w-3xl">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt="Pipeline visualization"
+        className="block max-h-[500px] w-full rounded-xl border border-slate-200 object-contain shadow dark:border-slate-800"
+      />
+      {hasOverlays && (
+        <svg
+          viewBox={`0 0 ${imageWidth} ${imageHeight}`}
+          preserveAspectRatio="xMidYMid meet"
+          className="pointer-events-none absolute inset-0 h-full w-full"
+        >
+          {overlays!.map((t, i) => {
+            const color = colorForFdi(t.fdi);
+            const stroke = Math.max(3, Math.min(imageWidth!, imageHeight!) * 0.004);
+            if (t.polygon && t.polygon.length >= 3) {
+              const d =
+                t.polygon
+                  .map(([x, y], j) => `${j === 0 ? "M" : "L"}${x},${y}`)
+                  .join("") + "Z";
+              return (
+                <path
+                  key={i}
+                  d={d}
+                  fill="none"
+                  stroke={color}
+                  strokeWidth={stroke}
+                  strokeLinejoin="round"
+                />
+              );
+            }
+            const [x1, y1, x2, y2] = t.bbox;
+            return (
+              <rect
+                key={i}
+                x={x1}
+                y={y1}
+                width={x2 - x1}
+                height={y2 - y1}
+                fill="none"
+                stroke={color}
+                strokeWidth={stroke}
+              />
+            );
+          })}
+        </svg>
+      )}
+      {hasOverlays && (
+        <div className="pointer-events-none absolute inset-0">
+          {overlays!.map((t, i) => {
+            const color = colorForFdi(t.fdi);
+            const [x1, y1] = t.bbox;
+            // Position label chip at the top-left of the bbox, slightly above.
+            const leftPct = (x1 / imageWidth!) * 100;
+            const topPct = (y1 / imageHeight!) * 100;
+            return (
+              <span
+                key={i}
+                className="absolute -translate-y-full whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-[11px] font-semibold leading-tight text-white shadow-sm sm:text-xs"
+                style={{
+                  left: `${leftPct}%`,
+                  top: `${topPct}%`,
+                  backgroundColor: color,
+                }}
+              >
+                {t.fdi}
+              </span>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }

@@ -92,6 +92,12 @@ export default function Page() {
         // so the panoramic path always renders the FDI row + correct stage
         // labels even when the prior query was a crops query.
         cropsMode: false,
+        // Same shape — undefined here so the prior query's overlay polygons
+        // don't render on top of a freshly uploaded panoramic until the new
+        // FDI stage event arrives.
+        toothOverlays: undefined,
+        imageWidth: undefined,
+        imageHeight: undefined,
       });
 
       // Scroll the pipeline panel into view so the user actually sees the
@@ -182,6 +188,9 @@ export default function Page() {
         currentImageUrl: null,  // no panoramic in crops mode
         mode,
         cropsMode: true,
+        toothOverlays: undefined,
+        imageWidth: undefined,
+        imageHeight: undefined,
       });
       requestAnimationFrame(() => {
         pipelineRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -450,15 +459,22 @@ function applyEvent(
       setPipeline((prev) => ({
         ...prev,
         [stage]: "done",
-        // The FDI overlay already carries the segmentation polygons baked in, so
-        // we skip the intermediate segment_overlay.png swap — it would force the
-        // browser to fetch a near-identical PNG only to replace it ~1s later
-        // when the FDI overlay arrives. On a slow backend that race shows up as
-        // "lines appear after the Number pill turns green". Only swap on `fdi`.
-        currentImageUrl:
-          rawStage === "fdi"
-            ? evt.data.annotated_image_url ?? prev.currentImageUrl
-            : prev.currentImageUrl,
+        // currentImageUrl stays pinned to the user's just-uploaded preview.
+        // Overlay outlines + FDI labels arrive as JSON on the FDI stage and
+        // get layered on top by ImageWithOverlays — no PNG fetch on the hot
+        // path, so visuals arrive instantly when the stage event lands.
+        toothOverlays:
+          rawStage === "fdi" && Array.isArray(evt.data.tooth_overlays)
+            ? evt.data.tooth_overlays
+            : prev.toothOverlays,
+        imageWidth:
+          rawStage === "fdi" && typeof evt.data.image_width === "number"
+            ? evt.data.image_width
+            : prev.imageWidth,
+        imageHeight:
+          rawStage === "fdi" && typeof evt.data.image_height === "number"
+            ? evt.data.image_height
+            : prev.imageHeight,
         toothCount:
           typeof evt.data.n_teeth === "number" ? evt.data.n_teeth : prev.toothCount,
       }));

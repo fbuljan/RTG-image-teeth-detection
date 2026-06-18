@@ -136,6 +136,22 @@ export type StageCompleteData = {
   n_dropped_duplicates?: number;
   per_crop?: PerCrop[];
   crops_mode?: boolean;
+  // FDI stage carries the overlay data on the wire — polygons + bboxes + FDI
+  // labels in image-native pixel space — so the frontend renders SVG outlines
+  // and DOM label chips directly over the user's uploaded image. Avoids the
+  // 1.5 MB overlay-PNG fetch that on slow links caused the visuals to lag
+  // behind the "Done" badge.
+  image_width?: number;
+  image_height?: number;
+  tooth_overlays?: ToothOverlay[];
+};
+
+export type ToothOverlay = {
+  fdi: string;
+  // [x1, y1, x2, y2] in image-native pixels.
+  bbox: [number, number, number, number];
+  // Mask polygon, image-native pixels. Absent on detection mode (use bbox).
+  polygon?: Array<[number, number]>;
 };
 
 // Per-input-crop record emitted by the validate stage.
